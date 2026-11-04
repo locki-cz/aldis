@@ -136,6 +136,7 @@ impl AgentBackend for SystemBackend {
             inventory: None,
             peers: Vec::new(),
             foci_release: None,
+            beacon: crate::beacon::Targets::default(),
         };
         if snapshot.host.info.state == KlippyState::Disconnected {
             return snapshot;
@@ -151,6 +152,11 @@ impl AgentBackend for SystemBackend {
                     snapshot.peers = self.peers(snapshot.host.klipper_unit.as_deref());
                 }
                 snapshot.foci_release = self.foci_release(&inventory);
+                snapshot.beacon = crate::beacon::targets_for(
+                    &inventory,
+                    None,
+                    snapshot.host.info.klipper_path.as_deref(),
+                );
                 snapshot.inventory = Some(inventory);
             }
             Err(MoonrakerError::ConfigError(_)) => snapshot.host.config_error = true,
@@ -265,7 +271,8 @@ impl SystemBackend {
             RunRequest {
                 targets,
                 target_versions: &TargetVersions::klipper(CheckoutRevision::Known(version.clone()))
-                    .with_foci_release(snapshot.foci_release.clone()),
+                    .with_foci_release(snapshot.foci_release.clone())
+                    .with_beacon_targets(snapshot.beacon.clone()),
                 foci_releases: &GithubReleases::new(),
                 clean: false,
             },

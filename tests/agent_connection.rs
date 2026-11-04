@@ -37,6 +37,7 @@ impl AgentBackend for Idle {
             }),
             peers: Vec::new(),
             foci_release: None,
+            beacon: aldis::beacon::Targets::default(),
         }
     }
     fn try_lock(&self) -> Result<UpdateLock, LockError> {

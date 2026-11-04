@@ -37,6 +37,8 @@ pub struct Snapshot {
     pub peers: Vec<PeerState>,
     /// The latest FOCI release; `None` without a FOCI MCU or when it could not be looked up.
     pub foci_release: Option<Release>,
+    /// The image each Beacon is updated to, or why none is known; empty without a Beacon.
+    pub beacon: crate::beacon::Targets,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -287,7 +289,8 @@ pub fn assess(snapshot: &Snapshot) -> StatusBody {
             .clone()
             .map_or(CheckoutRevision::Indeterminate, CheckoutRevision::Known),
     )
-    .with_foci_release(snapshot.foci_release.clone());
+    .with_foci_release(snapshot.foci_release.clone())
+    .with_beacon_targets(snapshot.beacon.clone());
     let software_label = software.as_deref().unwrap_or("unknown");
     let mut mcus = Vec::new();
     if let Some(inventory) = &snapshot.inventory {
@@ -309,10 +312,27 @@ pub fn assess(snapshot: &Snapshot) -> StatusBody {
                 (Eligibility::ExternallyManaged(app), _) => {
                     (McuState::ExternallyManaged, format!("managed by {app}"))
                 }
-                // The agent does not look for Beacon images yet.
-                (Eligibility::Beacon(_), _) => {
-                    (McuState::ExternallyManaged, "managed by Beacon".to_owned())
+                (Eligibility::Beacon(_), Some(RevisionStatus::Current)) => {
+                    (McuState::Current, format!("running {running}"))
                 }
+                (Eligibility::Beacon(_), revision) => match snapshot.beacon.mcus.get(&mcu.name) {
+                    Some(Ok(target)) if revision == Some(RevisionStatus::UpdateRequired) => (
+                        McuState::UpdateAvailable,
+                        format!(
+                            "running {running}, {} holds {}",
+                            target.path.display(),
+                            target.version.reported()
+                        ),
+                    ),
+                    Some(Err(reason)) => (
+                        McuState::Indeterminate,
+                        format!("running {running}; no Beacon firmware image is known: {reason}"),
+                    ),
+                    _ => (
+                        McuState::Indeterminate,
+                        format!("running {running}; no Beacon firmware image is known"),
+                    ),
+                },
                 (Eligibility::Foci(_), Some(RevisionStatus::Current)) => {
                     (McuState::Current, format!("running {running}"))
                 }
@@ -458,6 +478,7 @@ mod tests {
             }),
             peers: Vec::new(),
             foci_release: None,
+            beacon: crate::beacon::Targets::default(),
         }
     }
 
@@ -495,6 +516,77 @@ mod tests {
             .into_iter()
             .find(|entry| entry.name == "ouroboros")
             .unwrap()
+    }
+
+    fn with_beacon(mut snapshot: Snapshot, target: Option<Result<u16, &str>>) -> Snapshot {
+        let mut beacon = mcu("mcu beacon", "Beacon 2.0.1", "");
+        beacon.app = Some(String::new());
+        snapshot.inventory.as_mut().unwrap().mcus.push(beacon);
+        if let Some(target) = target {
+            let path = std::path::PathBuf::from("/home/pi/beacon_klipper/firmware/revh.dfu");
+            let target = target
+                .map(|bcd| crate::beacon::Target {
+                    revision: "h".to_owned(),
+                    path: path.clone(),
+                    version: crate::beacon::Version::from_bcd(bcd),
+                })
+                .map_err(|product| crate::beacon::Unavailable::UnknownRevision(product.to_owned()));
+            snapshot.beacon.mcus.insert("mcu beacon".to_owned(), target);
+        }
+        snapshot
+    }
+
+    fn beacon_entry(snapshot: &Snapshot) -> McuEntry {
+        assess(snapshot)
+            .mcus
+            .into_iter()
+            .find(|entry| entry.name == "beacon")
+            .unwrap()
+    }
+
+    #[test]
+    fn offers_an_update_for_a_beacon_whose_image_differs() {
+        let mut snapshot = with_beacon(ready_snapshot(), Some(Ok(0x2010)));
+
+        let entry = beacon_entry(&snapshot);
+
+        assert_eq!(entry.state, McuState::UpdateAvailable);
+        assert_eq!(entry.actions, vec![Action::Update]);
+        assert_eq!(
+            entry.message,
+            "running Beacon 2.0.1, /home/pi/beacon_klipper/firmware/revh.dfu holds Beacon 2.1.0"
+        );
+
+        snapshot.host.print_state = Some(PrintState::Printing);
+        assert!(beacon_entry(&snapshot).actions.is_empty());
+    }
+
+    #[test]
+    fn reports_a_beacon_at_its_image_as_current() {
+        let entry = beacon_entry(&with_beacon(ready_snapshot(), Some(Ok(0x2001))));
+
+        assert_eq!(entry.state, McuState::Current);
+        assert!(entry.actions.is_empty());
+        assert_eq!(entry.message, "running Beacon 2.0.1");
+    }
+
+    #[test]
+    fn cannot_compare_a_beacon_without_a_known_image() {
+        let unknown = beacon_entry(&with_beacon(ready_snapshot(), Some(Err("Beacon Classic"))));
+        assert_eq!(unknown.state, McuState::Indeterminate);
+        assert!(unknown.actions.is_empty());
+        assert_eq!(
+            unknown.message,
+            "running Beacon 2.0.1; no Beacon firmware image is known: its USB product name \
+             \"Beacon Classic\" names no Beacon revision"
+        );
+
+        let missing = beacon_entry(&with_beacon(ready_snapshot(), None));
+        assert_eq!(missing.state, McuState::Indeterminate);
+        assert_eq!(
+            missing.message,
+            "running Beacon 2.0.1; no Beacon firmware image is known"
+        );
     }
 
     #[test]
