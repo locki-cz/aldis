@@ -36,6 +36,7 @@ pub struct SystemBackend {
     used_unit: Mutex<Option<KlipperUnit>>,
     peer_urls: Vec<String>,
     foci_release: Mutex<ReleaseCache>,
+    sources: crate::config::FirmwareSources,
 }
 
 impl SystemBackend {
@@ -46,7 +47,14 @@ impl SystemBackend {
             used_unit: Mutex::new(None),
             peer_urls: Vec::new(),
             foci_release: Mutex::default(),
+            sources: crate::config::FirmwareSources::default(),
         }
+    }
+
+    /// Sets where firmware that is not built from Klipper is read from.
+    pub fn with_firmware_sources(mut self, sources: crate::config::FirmwareSources) -> Self {
+        self.sources = sources;
+        self
     }
 
     /// Sets the other printers whose state gates a USB-CAN bridge update.
@@ -156,12 +164,12 @@ impl AgentBackend for SystemBackend {
                 snapshot.foci_release = self.foci_release(&inventory);
                 snapshot.beacon = crate::beacon::targets_for(
                     &inventory,
-                    None,
+                    self.sources.beacon.as_deref(),
                     snapshot.host.info.klipper_path.as_deref(),
                 );
                 snapshot.cartographer = crate::cartographer::targets_for(
                     &inventory,
-                    None,
+                    self.sources.cartographer.as_deref(),
                     snapshot.host.info.python_path.as_deref(),
                 );
                 snapshot.inventory = Some(inventory);

@@ -70,6 +70,15 @@ sudo ~/aldis/aldis setup --agent --moonraker http://127.0.0.1:7125 --moonraker h
 
 Each printer has its own MCU status, firmware updates and history. Updates run one at a time across the host.
 
+The same file tells the agent where Beacon and Cartographer firmware lives when it is not in the default places (see [Beacon](#beacon) and [Cartographer](#cartographer)):
+
+```toml
+beacon_source = "/home/pi/beacon_klipper"
+cartographer_source = "/home/pi/cartographer_firmware"
+```
+
+The command-line tools take `--beacon-source` and `--cartographer-source` (or `ALDIS_BEACON_SOURCE` and `ALDIS_CARTOGRAPHER_SOURCE`) instead.
+
 Klipper services other than `klipper` (such as `klipper-2` or `klipper@voron`) need sudo 1.9.10 or newer: Debian 12, Raspberry Pi OS Bookworm, Ubuntu 24.04. The default `klipper` service works with any sudo. With several printers configured, `setup --check` prints the sudo version.
 
 Flashing a USB-CAN bridge resets its CAN bus, so aldis refuses while another printer on that bus is printing, starting up, or cannot be checked. It stops nothing on the other printers, and their Klipper may need a `FIRMWARE_RESTART` once the bridge is back. `update` and `flash` run the same check when given `--config PATH` (or `ALDIS_CONFIG`). Without it they look only at the printer named by `--moonraker`.
@@ -157,7 +166,7 @@ flashes only after it has. Requirements:
 
 [Beacon](https://github.com/beacon3d/beacon_klipper) probes are not built from the Klipper checkout either. Their firmware ships as one image per hardware revision (`firmware/rev<x>.dfu`) in the `beacon_klipper` checkout, which is updated with `git pull`. `aldis` flashes a Beacon with the image for its revision from that checkout:
 
-- The checkout is the one Beacon's installer linked `klippy/extras/beacon.py` from in the Klipper checkout, otherwise `~/beacon_klipper`. Name another with `--beacon-source` (or `ALDIS_BEACON_SOURCE`). `status` shows it as `Beacon firmware`.
+- The checkout is the one Beacon's installer linked `klippy/extras/beacon.py` from in the Klipper checkout, otherwise `~/beacon_klipper`. Name another with `--beacon-source` (or `ALDIS_BEACON_SOURCE`), or `beacon_source` in the agent's configuration file. `status` shows it as `Beacon firmware`.
 - A Beacon is recognized by the version it reports (`Beacon 2.1.0`). Its revision comes from the USB product name of the device behind its configured `serial:` (`Beacon RevH` takes `revh.dfu`), and the image's version from its DFU suffix, whose checksum must match.
 - As with Beacon's own `update_firmware.py`, any difference between the running version and the image counts as an update, so checking out an older `beacon_klipper` commit downgrades.
 - The update reads the image right before flashing it and refuses it if the checkout now holds another version than the one approved. It keeps a copy in the run workspace.
@@ -173,7 +182,7 @@ A Beacon left in its bootloader (for example by an interrupted flash) can only l
 
 [Cartographer](https://github.com/Cartographer3D/cartographer_firmware) probes are not built from the Klipper checkout either. Their firmware is published as prebuilt images in the `cartographer_firmware` repository, one per probe generation, link (USB, or CAN at one bitrate) and build (full or lite), listed in its `firmware_list.csv`. `aldis` flashes a Cartographer with an image from your own clone of it:
 
-- The clone is `~/cartographer_firmware`; name another with `--cartographer-source` (or `ALDIS_CARTOGRAPHER_SOURCE`). `status` shows it as `Cartographer firmware`, with the installed `cartographer3d-plugin` version, read from the virtualenv Klippy runs under (or `~/klippy-env`).
+- The clone is `~/cartographer_firmware`; name another with `--cartographer-source` (or `ALDIS_CARTOGRAPHER_SOURCE`), or `cartographer_source` in the agent's configuration file. `status` shows it as `Cartographer firmware`, with the installed `cartographer3d-plugin` version, read from the virtualenv Klippy runs under (or `~/klippy-env`).
 - A Cartographer is recognized by its `app` (`Cartographer`, from 6.1.0) or, before that, by a version starting with `Cartographer`. Its generation comes from its `MCU` (`stm32f042x6` is V2/V3, `stm32g431xx` V4), its build from its version (`lite`, or `K1` for the 5.x V3 builds, is the lite build), and its link and bitrate from its `CANBUS_FREQUENCY`. A version without a number (`CARTOGRAPHER V3`) cannot be compared and is reported as unsupported.
 - Only images the manifest lists as updates onto an existing Katapult are considered, never one that includes or replaces the bootloader. A wrong image leaves a Cartographer recoverable only with its boot pins bridged by hand, so the manifest only nominates candidates: each image's own embedded identify dictionary must name exactly the probe's `MCU`, CAN bitrate and build, and the version the manifest gives, and the image must be linked to start at `0x08002000`, after Cartographer's 8 KiB Katapult. Exactly one image may match.
 - The image is the newest the installed plugin works with (`min_plugin_version`); `status` names a newer one the plugin is too old for. Update the plugin yourself first; `aldis` never installs it. A probe newer than its image is not downgraded unless `--force` is given.
