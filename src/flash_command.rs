@@ -118,6 +118,7 @@ fn run_flash(mut arguments: FlashArgs, ui: &mut UpdateUi) -> anyhow::Result<()> 
             pending.approve(),
             &firmware,
             board.application_start(),
+            aldis::flash::system::PrebuiltLinks::UsbOnly,
             options,
             |progress| ui.progress_without_build(progress),
         ),

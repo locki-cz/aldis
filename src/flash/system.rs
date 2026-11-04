@@ -164,6 +164,11 @@ pub enum SystemFlashError {
         /// The configured transport.
         transport: String,
     },
+    /// Prebuilt firmware that may go over USB or CAN is never sent over a UART.
+    KatapultNotOnUart {
+        /// The configured transport.
+        transport: String,
+    },
     /// The bootloader that appeared is not Katapult, the only one prebuilt firmware is sent to.
     NotKatapult {
         /// The bootloader that appeared.
@@ -200,6 +205,12 @@ impl fmt::Display for SystemFlashError {
                 f,
                 "the CAN bootloader did not respond to a connection request"
             ),
+            Self::CanFlash(error @ KatapultFlashError::ApplicationStartMismatch { .. }) => {
+                write!(
+                    f,
+                    "refusing to flash: {error}; Katapult was asked to start the existing application"
+                )
+            }
             Self::CanFlash(_) => write!(
                 f,
                 "the CAN bootloader rejected or could not verify the firmware transfer"
@@ -307,6 +318,11 @@ impl fmt::Display for SystemFlashError {
                 "this firmware is flashed only through Katapult on a USB serial device, and the \
                  MCU is configured on {transport}"
             ),
+            Self::KatapultNotOnUart { transport } => write!(
+                f,
+                "this firmware is flashed only through Katapult over USB or CAN, and the MCU is \
+                 configured on {transport}"
+            ),
             Self::NotKatapult {
                 bootloader,
                 transport,
@@ -336,6 +352,7 @@ impl std::error::Error for SystemFlashError {
         match self {
             Self::MissingTransport
             | Self::KatapultUsbOnly { .. }
+            | Self::KatapultNotOnUart { .. }
             | Self::NotKatapult { .. }
             | Self::BeaconUsbOnly { .. }
             | Self::BeaconImageMismatch { .. }
@@ -744,32 +761,50 @@ pub fn katapult_route(
     })
 }
 
-/// Flashes prebuilt firmware, linked to start at `application_start`, to an MCU on a USB serial
-/// device. Unlike a build, a prebuilt image carries no Kconfig to choose a bootloader route or
+/// The links a prebuilt image may be sent to Katapult over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrebuiltLinks {
+    /// Only a USB serial device (FOCI has no CAN transport).
+    UsbOnly,
+    /// A USB serial device or CAN, but never a UART.
+    UsbOrCan,
+}
+
+/// Flashes prebuilt firmware, linked to start at `application_start`, to an MCU on one of
+/// `links`. Unlike a build, a prebuilt image carries no Kconfig to choose a bootloader route or
 /// an address by, so it is sent only to Katapult, and only when Katapult starts applications
 /// where the image is linked to run.
 pub fn flash_prebuilt_katapult_with_progress(
     prepared: &PreparedBuild,
     firmware: &[u8],
     application_start: u32,
+    links: PrebuiltLinks,
     options: SystemFlashOptions,
     mut progress: impl FnMut(SystemFlashProgress),
 ) -> Result<FlashResult, SystemFlashError> {
+    let refused = |transport: String| match links {
+        PrebuiltLinks::UsbOnly => SystemFlashError::KatapultUsbOnly { transport },
+        PrebuiltLinks::UsbOrCan => SystemFlashError::KatapultNotOnUart { transport },
+    };
     let device = match prepared
         .transport
         .as_ref()
         .ok_or(SystemFlashError::MissingTransport)?
     {
         McuTransport::Serial { device } if !is_tty_without_usb_device(Path::new(device)) => device,
-        McuTransport::Serial { device } => {
-            return Err(SystemFlashError::KatapultUsbOnly {
-                transport: format!("the UART {device}"),
-            });
+        McuTransport::Serial { device } => return Err(refused(format!("the UART {device}"))),
+        McuTransport::Can { interface, uuid } if links == PrebuiltLinks::UsbOrCan => {
+            return flash_prebuilt_can(
+                interface,
+                *uuid,
+                firmware,
+                application_start,
+                options,
+                &mut progress,
+            );
         }
         McuTransport::Can { interface, uuid } => {
-            return Err(SystemFlashError::KatapultUsbOnly {
-                transport: format!("CAN ({interface}, {uuid:012x})"),
-            });
+            return Err(refused(format!("CAN ({interface}, {uuid:012x})")));
         }
     };
     progress(SystemFlashProgress::EnteringBootloader);
@@ -848,6 +883,32 @@ pub fn flash_beacon_bootloader(
     wait_for_usb_device_access(&bootloader.sysfs_path)?;
     progress(SystemFlashProgress::Flashing);
     beacon_dfu::flash(bootloader, &image.payload).map_err(SystemFlashError::BeaconDfu)
+}
+
+/// Flashes prebuilt firmware to Katapult on CAN, refusing a Katapult that starts applications
+/// anywhere but `application_start`. The MCU must not itself be a USB-CAN bridge: entering its
+/// bootloader would take the CAN interface away.
+fn flash_prebuilt_can(
+    interface: &str,
+    uuid: u64,
+    firmware: &[u8],
+    application_start: u32,
+    options: SystemFlashOptions,
+    progress: &mut impl FnMut(SystemFlashProgress),
+) -> Result<FlashResult, SystemFlashError> {
+    progress(SystemFlashProgress::EnteringBootloader);
+    let io = SocketCanIo::open(interface, options.katapult.read_timeout)
+        .map_err(SystemFlashError::CanSocket)?;
+    let bootstrap = request_can_bootloader(io, uuid, options.katapult.read_timeout)
+        .map_err(SystemFlashError::Can)?;
+    thread::sleep(options.katapult.can_bootloader_settle);
+    let backend = bootstrap.connect().map_err(SystemFlashError::Can)?;
+    progress(SystemFlashProgress::BootloaderReady);
+    progress(SystemFlashProgress::Flashing);
+    backend
+        .expecting_application_start(application_start)
+        .flash(firmware)
+        .map_err(SystemFlashError::CanFlash)
 }
 
 /// The offset the device currently runs its application from, as far as the probe can tell.

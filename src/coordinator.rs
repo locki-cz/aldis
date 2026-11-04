@@ -89,6 +89,7 @@ impl FlashCoordinatorError {
                 error,
                 SystemFlashError::LinuxHost(_)
                     | SystemFlashError::KatapultUsbOnly { .. }
+                    | SystemFlashError::KatapultNotOnUart { .. }
                     | SystemFlashError::BeaconUsbOnly { .. }
             ),
             Self::Coordinator(_) | Self::Artifact(_) => true,
@@ -301,13 +302,14 @@ where
     }
 
     /// Stops Klipper if necessary, then sends prebuilt firmware, linked to start at
-    /// `application_start`, to the approved MCU's Katapult (see
+    /// `application_start`, to the approved MCU's Katapult over one of `links` (see
     /// [`flash_prebuilt_katapult_with_progress`]). Like every flash, this never restarts Klipper.
     pub fn flash_prebuilt_with_progress(
         &self,
         approved: ApprovedBuild,
         firmware: &[u8],
         application_start: u32,
+        links: crate::flash::system::PrebuiltLinks,
         options: SystemFlashOptions,
         mut progress: impl FnMut(UpdateProgress),
     ) -> Result<FlashResult, FlashCoordinatorError> {
@@ -317,6 +319,7 @@ where
             &approved.pending.prepared,
             firmware,
             application_start,
+            links,
             options,
             |stage| progress(update_progress(stage)),
         )

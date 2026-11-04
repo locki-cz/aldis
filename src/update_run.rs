@@ -478,6 +478,7 @@ pub fn run_updates<B: CommandPort, S: CommandPort>(
                     pending.approve(),
                     &image,
                     firmware.board.application_start(),
+                    crate::flash::system::PrebuiltLinks::UsbOnly,
                     standard_flash_options(),
                     |progress| hooks.progress(name, progress),
                 )
