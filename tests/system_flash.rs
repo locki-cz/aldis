@@ -179,3 +179,66 @@ fn refuses_prebuilt_firmware_over_can_before_touching_the_mcu() {
         Err(SystemFlashError::MissingTransport)
     ));
 }
+
+fn beacon_image() -> aldis::beacon::FirmwareImage {
+    aldis::beacon::FirmwareImage {
+        payload: vec![0xab; 8],
+        vendor_id: 0x04d8,
+        product_id: 0xbea1,
+        version: aldis::beacon::Version::from_bcd(0x2010),
+    }
+}
+
+#[test]
+fn refuses_beacon_firmware_over_can_before_touching_the_mcu() {
+    let mut stages = Vec::new();
+    let error = aldis::flash::system::flash_beacon_with_progress(
+        &prebuilt(Some(McuTransport::Can {
+            interface: "can0".to_owned(),
+            uuid: 0xe781_9ed8_e7d3,
+        })),
+        &beacon_image(),
+        aldis::update_run::standard_flash_options(),
+        |stage| stages.push(stage),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&error, SystemFlashError::BeaconUsbOnly { transport } if transport == "CAN (can0, e7819ed8e7d3)"),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .starts_with("Beacon firmware is flashed only over USB")
+    );
+    assert!(stages.is_empty());
+    assert!(
+        aldis::coordinator::FlashCoordinatorError::Flash(error).allows_klipper_restore(),
+        "an MCU that was never asked to enter its bootloader lets Klipper be restored"
+    );
+    assert!(matches!(
+        aldis::flash::system::flash_beacon_with_progress(
+            &prebuilt(None),
+            &beacon_image(),
+            aldis::update_run::standard_flash_options(),
+            |_| {},
+        ),
+        Err(SystemFlashError::MissingTransport)
+    ));
+}
+
+#[test]
+fn explains_a_bootloader_the_beacon_image_is_not_for() {
+    let error = SystemFlashError::BeaconImageMismatch {
+        bootloader: "04d8:beac".to_owned(),
+        image: "04d8:bea1".to_owned(),
+    };
+    let message = error.to_string();
+    assert!(message.contains("04d8:beac"), "{message}");
+    assert!(message.contains("update_firmware.py"), "{message}");
+    assert!(
+        !aldis::coordinator::FlashCoordinatorError::Flash(error).allows_klipper_restore(),
+        "the Beacon is left in its bootloader"
+    );
+}

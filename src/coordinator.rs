@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::build::{BuildArtifact, BuildError, BuildProgress, CommandPort, KlipperBuilder};
 use crate::flash::FlashResult;
 use crate::flash::system::{
-    SystemFlashError, SystemFlashOptions, SystemFlashProgress,
+    SystemFlashError, SystemFlashOptions, SystemFlashProgress, flash_beacon_with_progress,
     flash_prebuilt_katapult_with_progress, flash_prepared_firmware_file_with_progress,
     flash_prepared_system_with_progress,
 };
@@ -82,12 +82,14 @@ pub enum FlashCoordinatorError {
 impl FlashCoordinatorError {
     /// Whether Klipper can safely be restarted after this failure. A USB MCU may
     /// be left in its bootloader, but the host MCU never is, and an MCU on a transport prebuilt
-    /// firmware is not sent over was never asked to enter one.
+    /// or Beacon firmware is not sent over was never asked to enter one.
     pub fn allows_klipper_restore(&self) -> bool {
         match self {
             Self::Flash(error) => matches!(
                 error,
-                SystemFlashError::LinuxHost(_) | SystemFlashError::KatapultUsbOnly { .. }
+                SystemFlashError::LinuxHost(_)
+                    | SystemFlashError::KatapultUsbOnly { .. }
+                    | SystemFlashError::BeaconUsbOnly { .. }
             ),
             Self::Coordinator(_) | Self::Artifact(_) => true,
         }
@@ -314,6 +316,24 @@ where
             options,
             |stage| progress(update_progress(stage)),
         )
+        .map_err(FlashCoordinatorError::Flash)
+    }
+
+    /// Stops Klipper if necessary, then flashes a Beacon firmware image through the approved
+    /// Beacon's DFU bootloader (see [`flash_beacon_with_progress`]). Like every flash, this never
+    /// restarts Klipper.
+    pub fn flash_beacon_with_progress(
+        &self,
+        approved: ApprovedBuild,
+        image: &crate::beacon::FirmwareImage,
+        options: SystemFlashOptions,
+        mut progress: impl FnMut(UpdateProgress),
+    ) -> Result<FlashResult, FlashCoordinatorError> {
+        self.ensure_klipper_stopped(&mut progress)
+            .map_err(FlashCoordinatorError::Coordinator)?;
+        flash_beacon_with_progress(&approved.pending.prepared, image, options, |stage| {
+            progress(update_progress(stage))
+        })
         .map_err(FlashCoordinatorError::Flash)
     }
 
