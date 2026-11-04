@@ -59,6 +59,16 @@ fn run_flash(mut arguments: FlashArgs, ui: &mut UpdateUi) -> anyhow::Result<()> 
             )
         })
         .inspect_err(|error| ui.action(&format!("error: {error:#}")))?;
+    // A Cartographer takes only an application image for its own MCU and link, since anything
+    // else needs its boot pins bridged by hand to recover; refuse it before it is touched.
+    let cartographer = cartographer_check(
+        &inventory,
+        &arguments.target,
+        &arguments.firmware,
+        &firmware,
+    )
+    .map_err(|reason| anyhow::anyhow!("refusing to flash {}: {reason}", arguments.target))
+    .inspect_err(|error| ui.action(&format!("error: {error:#}")))?;
 
     crate::update::bridge_refusal(
         arguments.config.as_deref(),
@@ -86,6 +96,7 @@ fn run_flash(mut arguments: FlashArgs, ui: &mut UpdateUi) -> anyhow::Result<()> 
             &arguments.target,
             &arguments.firmware,
             firmware.len(),
+            cartographer,
         ))
     {
         ui.block("\nflash cancelled\n");
@@ -109,6 +120,14 @@ fn run_flash(mut arguments: FlashArgs, ui: &mut UpdateUi) -> anyhow::Result<()> 
         .then(|| aldis::foci::Board::from_mcu(&mcu.mcu))
         .flatten();
     let flashed = match (beacon_image, foci_board) {
+        _ if cartographer => coordinator.flash_prebuilt_with_progress(
+            pending.approve(),
+            &firmware,
+            aldis::cartographer::APPLICATION_START,
+            aldis::flash::system::PrebuiltLinks::UsbOrCan,
+            options,
+            |progress| ui.progress_without_build(progress),
+        ),
         (Some(image), _) => {
             coordinator.flash_beacon_with_progress(pending.approve(), &image, options, |progress| {
                 ui.progress_without_build(progress)
@@ -195,15 +214,57 @@ fn run_flash(mut arguments: FlashArgs, ui: &mut UpdateUi) -> anyhow::Result<()> 
         return Err(anyhow::anyhow!(message));
     }
     ui.finish_success("Klipper ready");
+    if cartographer {
+        ui.block(&format!(
+            "\nRecalibrate {} before printing: Cartographer's plugin removes the scan and touch \
+             models made with other firmware.\n",
+            arguments.target
+        ));
+    }
     ui.action("run completed successfully");
     Ok(())
 }
 
-fn confirmation_prompt(target: &str, firmware: &Path, byte_count: usize) -> String {
-    format!(
+fn confirmation_prompt(
+    target: &str,
+    firmware: &Path,
+    byte_count: usize,
+    removes_calibration: bool,
+) -> String {
+    let prompt = format!(
         "Flash {} ({byte_count} bytes) to {target}? This skips Klipper's Kconfig validation.",
         firmware.display()
-    )
+    );
+    if removes_calibration {
+        format!(
+            "{prompt} Cartographer's plugin then removes its scan and touch models, so it must be \
+             recalibrated before printing."
+        )
+    } else {
+        prompt
+    }
+}
+
+/// Whether `target` is a Cartographer, after checking that `firmware` suits it: an application
+/// image for its own MCU and link, CAN bitrate included. A file for the other build (full or
+/// lite) is allowed.
+fn cartographer_check(
+    inventory: &McuInventory,
+    target: &str,
+    file: &Path,
+    firmware: &[u8],
+) -> Result<bool, String> {
+    let Some(mcu) = inventory.mcus.iter().find(|mcu| mcu.name == target) else {
+        return Ok(false);
+    };
+    let running = match aldis::cartographer::identify(mcu) {
+        None => return Ok(false),
+        Some(Ok(running)) => running,
+        Some(Err(reason)) => return Err(reason.to_string()),
+    };
+    aldis::cartographer::check_image(firmware, &running)
+        .map(|_| true)
+        .map_err(|reason| format!("{} does not suit it: {reason}", file.display()))
 }
 
 /// The Beacon image `firmware` holds when `target` is a Beacon, including one whose version
@@ -243,7 +304,7 @@ fn flash_refusal(inventory: &McuInventory, target: &str) -> Option<String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{beacon_image, confirmation_prompt, flash_refusal};
+    use super::{beacon_image, cartographer_check, confirmation_prompt, flash_refusal};
     use aldis::moonraker::{Mcu, McuInventory};
     use aldis::update_run::{Operation, failure_message};
 
@@ -324,8 +385,45 @@ mod tests {
     }
 
     #[test]
+    fn takes_only_an_application_image_for_a_cartographers_own_mcu_and_link() {
+        let mut inventory = inventory_with("");
+        let probe = &mut inventory.mcus[0];
+        probe.app = Some("Cartographer".to_owned());
+        probe.version = Some("CARTOGRAPHER V4 6.0.0".to_owned());
+        probe.mcu = "stm32g431xx".to_owned();
+        probe.canbus_frequency_hz = Some(1_000_000);
+
+        let file = PathBuf::from("klipper.bin");
+        let reason =
+            cartographer_check(&inventory, "mcu xiao", &file, b"plain binary").unwrap_err();
+        assert_eq!(
+            reason,
+            "klipper.bin does not suit it: it holds no Cartographer identify dictionary"
+        );
+        assert_eq!(
+            cartographer_check(
+                &inventory_with("CONFIG_MACH_STM32=y\n"),
+                "mcu xiao",
+                &file,
+                b"x"
+            ),
+            Ok(false),
+            "other MCUs take any file"
+        );
+        inventory.mcus[0].version = Some("CARTOGRAPHER V3".to_owned());
+        assert!(
+            cartographer_check(&inventory, "mcu xiao", &file, b"x")
+                .unwrap_err()
+                .contains("names no version number")
+        );
+
+        let prompt = confirmation_prompt("mcu xiao", &PathBuf::from("carto.bin"), 1, true);
+        assert!(prompt.contains("must be recalibrated"), "{prompt}");
+    }
+
+    #[test]
     fn names_the_firmware_file_target_and_byte_count_in_the_confirmation_prompt() {
-        let prompt = confirmation_prompt("mcu toolhead", &PathBuf::from("custom.bin"), 4096);
+        let prompt = confirmation_prompt("mcu toolhead", &PathBuf::from("custom.bin"), 4096, false);
 
         assert!(prompt.contains("custom.bin"));
         assert!(prompt.contains("4096 bytes"));
