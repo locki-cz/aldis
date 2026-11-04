@@ -115,6 +115,11 @@ fn connection_label(transport: Option<&McuTransport>) -> String {
 fn supported_label(eligibility: &Eligibility) -> String {
     match eligibility {
         Eligibility::Eligible => "yes".to_owned(),
+        Eligibility::Foci(firmware) => format!(
+            "yes (FOCI {} {} release builds)",
+            firmware.board.crate_name(),
+            firmware.flavor.label()
+        ),
         Eligibility::ExternallyManaged(app) => format!("no (third-party firmware: {app})"),
         Eligibility::Unsupported(reason) => format!("no ({reason})"),
         Eligibility::UnsupportedMcu(family) => {

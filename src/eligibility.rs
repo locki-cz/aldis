@@ -1,5 +1,6 @@
 //! Read-only MCU update eligibility and revision comparison.
 
+use crate::foci;
 use crate::moonraker::Mcu;
 
 /// Whether this updater may manage a discovered MCU.
@@ -7,6 +8,9 @@ use crate::moonraker::Mcu;
 pub enum Eligibility {
     /// A Klipper-family MCU with the embedded configuration required to build it.
     Eligible,
+    /// A FOCI release build this updater can replace with the same board's and flavor's build
+    /// from a FOCI release.
+    Foci(foci::Firmware),
     /// Firmware managed by another project, named as Moonraker reported it (e.g. "Beacon").
     ExternallyManaged(String),
     /// Legacy or unidentified Klipper-family firmware without required updater metadata.
@@ -45,6 +49,9 @@ pub enum UnsupportedReason {
         running: String,
         minimum: &'static str,
     },
+    /// FOCI firmware whose build no FOCI release asset matches.
+    #[error(transparent)]
+    Foci(foci::Unsupported),
 }
 
 /// Minimum Klipper version required to reliably report `mcu_kconfig`; see README.md.
@@ -87,12 +94,25 @@ impl CheckoutRevision {
 pub struct TargetVersions {
     /// The Klipper checkout revision Klipper-family MCUs are built from.
     pub klipper: CheckoutRevision,
+    /// The FOCI release FOCI MCUs are updated to; `None` when it is not known.
+    pub foci: Option<foci::Release>,
 }
 
 impl TargetVersions {
-    /// Targets for Klipper-family MCUs built from `checkout`.
+    /// Targets for Klipper-family MCUs built from `checkout`, and no known FOCI release.
     pub fn klipper(checkout: CheckoutRevision) -> Self {
-        Self { klipper: checkout }
+        Self {
+            klipper: checkout,
+            foci: None,
+        }
+    }
+
+    /// These targets with FOCI MCUs updated to `release`.
+    pub fn with_foci_release(self, release: Option<foci::Release>) -> Self {
+        Self {
+            foci: release,
+            ..self
+        }
     }
 
     /// Targets nothing is compared against, for a run that only verifies reconnection.
@@ -101,12 +121,24 @@ impl TargetVersions {
     }
 
     /// The target `mcu` is updated to, for display; `unknown` when indeterminate.
-    pub fn label_for(&self, _mcu: &Mcu) -> &str {
+    pub fn label_for(&self, mcu: &Mcu) -> &str {
+        if foci::is_foci(mcu) {
+            return self
+                .foci
+                .as_ref()
+                .map_or("unknown", |release| release.tag.as_str());
+        }
         self.klipper.label()
     }
 
     /// Whether `mcu` runs its target: `None` when there is no known target to check against.
     pub fn reached_by(&self, mcu: &Mcu) -> Option<bool> {
+        if foci::is_foci(mcu) {
+            let release = self.foci.as_ref()?;
+            return Some(foci::identify(mcu).is_ok_and(|firmware| {
+                foci::compare(&firmware.version, release) == RevisionStatus::Current
+            }));
+        }
         match &self.klipper {
             CheckoutRevision::Known(revision) => Some(
                 mcu.version
@@ -152,8 +184,8 @@ pub fn is_selected(mcu: &Mcu, versions: &TargetVersions, selection: &UpdateSelec
 /// Classifies one MCU and compares its revision when eligible.
 pub fn assess_mcu(mcu: &Mcu, versions: &TargetVersions) -> McuStatus {
     let eligibility = classify_mcu(mcu);
-    let revision =
-        (eligibility == Eligibility::Eligible).then(|| match (&mcu.version, &versions.klipper) {
+    let revision = match &eligibility {
+        Eligibility::Eligible => Some(match (&mcu.version, &versions.klipper) {
             (Some(running), CheckoutRevision::Known(selected))
                 if revisions_match(running, selected) =>
             {
@@ -161,7 +193,17 @@ pub fn assess_mcu(mcu: &Mcu, versions: &TargetVersions) -> McuStatus {
             }
             (Some(_), CheckoutRevision::Known(_)) => RevisionStatus::UpdateRequired,
             _ => RevisionStatus::Indeterminate,
-        });
+        }),
+        Eligibility::Foci(firmware) => Some(
+            versions
+                .foci
+                .as_ref()
+                .map_or(RevisionStatus::Indeterminate, |release| {
+                    foci::compare(&firmware.version, release)
+                }),
+        ),
+        _ => None,
+    };
     McuStatus {
         eligibility,
         revision,
@@ -233,6 +275,10 @@ pub fn classify_mcu(mcu: &Mcu) -> Eligibility {
         Some(app) if app.eq_ignore_ascii_case("kalico") => {
             classify_known_firmware(mcu, FirmwareKind::Kalico, KALICO_MINIMUM_VERSION)
         }
+        Some(app) if app.eq_ignore_ascii_case(foci::APP) => match foci::identify(mcu) {
+            Ok(firmware) => Eligibility::Foci(firmware),
+            Err(reason) => Eligibility::Unsupported(UnsupportedReason::Foci(reason)),
+        },
         Some(app) => Eligibility::ExternallyManaged(app.to_owned()),
         None => classify_unidentified(mcu),
     }

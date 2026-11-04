@@ -324,3 +324,99 @@ fn never_selects_an_mcu_family_without_a_flashable_bootloader() {
     assert!(!is_selected(&samd, &checkout, &UpdateSelection::Required));
     assert!(!is_selected(&samd, &checkout, &UpdateSelection::All));
 }
+
+fn foci(version: &str, build_versions: &str) -> Mcu {
+    Mcu {
+        name: "mcu ouroboros".to_owned(),
+        app: Some("FOCI".to_owned()),
+        version: Some(version.to_owned()),
+        mcu: "stm32h723xx".to_owned(),
+        canbus_frequency_hz: None,
+        build_versions: Some(build_versions.to_owned()),
+        transport: None,
+        kconfig: String::new(),
+    }
+}
+
+const FOCI_PROD: &str = "rust=1.98.1 features=none board=a82de21d";
+
+fn foci_release(tag: &str) -> TargetVersions {
+    TargetVersions::klipper(CheckoutRevision::Known("v0.13.0-770-gce7002bed".to_owned()))
+        .with_foci_release(Some(aldis::foci::Release::from_tag(tag).unwrap()))
+}
+
+#[test]
+fn compares_a_foci_release_build_against_the_foci_release() {
+    let running = foci("v0.4.0-0-g0fb68e1b", FOCI_PROD);
+
+    let outdated = assess_mcu(&running, &foci_release("v0.4.1"));
+    assert!(matches!(outdated.eligibility, Eligibility::Foci(_)));
+    assert_eq!(outdated.revision, Some(RevisionStatus::UpdateRequired));
+    assert_eq!(
+        assess_mcu(&running, &foci_release("v0.4.0")).revision,
+        Some(RevisionStatus::Current)
+    );
+    assert_eq!(
+        assess_mcu(
+            &running,
+            &TargetVersions::klipper(CheckoutRevision::Known("v0.4.0-0-g0fb68e1b".to_owned()))
+        )
+        .revision,
+        Some(RevisionStatus::Indeterminate),
+        "the Klipper checkout is no target for FOCI"
+    );
+}
+
+#[test]
+fn reports_a_foci_build_no_release_matches_as_unsupported() {
+    let status = assess_mcu(
+        &foci(
+            "v0.4.1-0-ga82de21d",
+            "rust=1.98.1 features=dev board=a82de21d",
+        ),
+        &foci_release("v0.4.1"),
+    );
+
+    assert_eq!(
+        status.eligibility,
+        Eligibility::Unsupported(UnsupportedReason::Foci(
+            aldis::foci::Unsupported::UnknownFlavor("dev".to_owned())
+        ))
+    );
+    assert_eq!(status.revision, None);
+}
+
+#[test]
+fn targets_and_confirms_foci_mcus_by_the_foci_release() {
+    let versions = foci_release("v0.4.1");
+    let klipper = mcu(
+        Some("Klipper"),
+        Some("v0.13.0-770-gce7002bed"),
+        "CONFIG=x\n",
+    );
+
+    assert_eq!(
+        versions.label_for(&foci("v0.4.0-0-g0fb68e1b", FOCI_PROD)),
+        "v0.4.1"
+    );
+    assert_eq!(versions.label_for(&klipper), "v0.13.0-770-gce7002bed");
+    assert_eq!(
+        versions.reached_by(&foci("v0.4.1-0-ga82de21d", FOCI_PROD)),
+        Some(true)
+    );
+    assert_eq!(
+        versions.reached_by(&foci("v0.4.0-0-g0fb68e1b", FOCI_PROD)),
+        Some(false)
+    );
+    assert_eq!(versions.reached_by(&klipper), Some(true));
+
+    let unknown = TargetVersions::indeterminate();
+    assert_eq!(
+        unknown.label_for(&foci("v0.4.0-0-g0fb68e1b", FOCI_PROD)),
+        "unknown"
+    );
+    assert_eq!(
+        unknown.reached_by(&foci("v0.4.0-0-g0fb68e1b", FOCI_PROD)),
+        None
+    );
+}
