@@ -414,7 +414,47 @@ fn read_beacon_image(
     Ok(image)
 }
 
-/// Builds (or, for FOCI and Beacon, downloads or reads) and flashes each approved target in order, then starts
+/// Reads the Cartographer image `name` was approved for from the clone, checks it once more
+/// against the running probe, and keeps a copy beside the run's other artifacts. Returns the
+/// failure's description when there is no image to flash, including when the clone now holds
+/// another image than the one approved.
+fn read_cartographer_image(
+    firmware: &crate::cartographer::Firmware,
+    pending: &crate::coordinator::PendingBuild,
+    request: &RunRequest<'_>,
+    hooks: &mut dyn RunHooks,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    let target = request
+        .target_versions
+        .cartographer
+        .target(name)
+        .ok_or_else(|| format!("no Cartographer firmware image is known to update {name} with"))?;
+    hooks.progress(name, UpdateProgress::ReadingFirmware);
+    let image = std::fs::read(&target.path)
+        .map_err(|error| format!("could not read {}: {error}", target.path.display()))?;
+    let identity = crate::cartographer::check_image(&image, firmware)
+        .map_err(|reason| format!("refusing {} for {name}: {reason}", target.path.display()))?;
+    if identity.version != target.reported {
+        return Err(format!(
+            "{} now holds {:?}, not the {:?} {name} was to be updated to",
+            target.path.display(),
+            identity.version,
+            target.reported
+        ));
+    }
+    hooks.progress(name, UpdateProgress::FirmwareRead);
+    if let Some(file) = target.path.file_name() {
+        let copy = pending.artifact_path().with_file_name(file);
+        if let Err(error) = std::fs::write(&copy, &image) {
+            tracing::debug!(?error, path = %copy.display(), "could not keep a copy of the firmware");
+        }
+    }
+    Ok(image)
+}
+
+/// Builds (or, for FOCI, Beacon and Cartographer, downloads or reads) and flashes each approved
+/// target in order, then starts
 /// Klipper and waits for every updated MCU to reconnect at its target version. The first failure
 /// ends the run.
 pub fn run_updates<B: CommandPort, S: CommandPort>(
@@ -479,6 +519,31 @@ pub fn run_updates<B: CommandPort, S: CommandPort>(
                     &image,
                     firmware.board.application_start(),
                     crate::flash::system::PrebuiltLinks::UsbOnly,
+                    standard_flash_options(),
+                    |progress| hooks.progress(name, progress),
+                )
+            }
+            Eligibility::Cartographer(firmware) => {
+                let image =
+                    match read_cartographer_image(&firmware, &pending, &request, hooks, name) {
+                        Ok(image) => image,
+                        Err(detail) => {
+                            // Nothing was written; Klipper goes back to how it was found.
+                            let restore = coordinator.restore_after_failure();
+                            return Err(fail_with_detail(
+                                hooks,
+                                detail.clone(),
+                                failure_message(Operation::Update, detail, Some(restore)),
+                                Some(name),
+                                &updated,
+                            ));
+                        }
+                    };
+                coordinator.flash_prebuilt_with_progress(
+                    pending.approve(),
+                    &image,
+                    crate::cartographer::APPLICATION_START,
+                    crate::flash::system::PrebuiltLinks::UsbOrCan,
                     standard_flash_options(),
                     |progress| hooks.progress(name, progress),
                 )
@@ -1523,6 +1588,185 @@ mod tests {
         assert_eq!(
             unknown.detail,
             "no Beacon firmware image is known to update mcu beacon with"
+        );
+    }
+
+    /// A Cartographer application image: a vector table above the 8 KiB Katapult, then the
+    /// zlib-compressed identify dictionary.
+    fn cartographer_image(version: &str, can: Option<u64>) -> Vec<u8> {
+        use std::io::Write;
+        let mut image = Vec::new();
+        image.extend_from_slice(&0x2000_8000_u32.to_le_bytes());
+        image.extend_from_slice(&0x0800_2101_u32.to_le_bytes());
+        image.resize(0x200, 0);
+        let mut config = serde_json::json!({ "MCU": "stm32g431xx" });
+        if let Some(can) = can {
+            config["CANBUS_FREQUENCY"] = can.into();
+        }
+        let dictionary = serde_json::json!({ "version": version, "config": config });
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(dictionary.to_string().as_bytes())
+            .unwrap();
+        image.extend(encoder.finish().unwrap());
+        image
+    }
+
+    fn cartographer_mcu(can: Option<u64>) -> Mcu {
+        Mcu {
+            name: "mcu cartographer".to_owned(),
+            app: Some("Cartographer".to_owned()),
+            version: Some("CARTOGRAPHER V4 6.0.0".to_owned()),
+            mcu: "stm32g431xx".to_owned(),
+            canbus_frequency_hz: can,
+            build_versions: Some(String::new()),
+            transport: Some(match can {
+                // An interface no host has, so the flash fails opening it.
+                Some(_) => McuTransport::Can {
+                    interface: "aldistest0".to_owned(),
+                    uuid: 0xe781_9ed8_e7d3,
+                },
+                None => McuTransport::Serial {
+                    device: "/dev/serial/by-id/usb-Cartographer_614e-if00".to_owned(),
+                },
+            }),
+            kconfig: String::new(),
+        }
+    }
+
+    fn cartographer_targets(path: &Path, reported: &str) -> TargetVersions {
+        TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())).with_cartographer_targets(
+            crate::cartographer::Targets {
+                checkout: path.parent().map(Path::to_owned),
+                plugin: None,
+                mcus: [(
+                    "mcu cartographer".to_owned(),
+                    Ok(crate::cartographer::Target {
+                        path: path.to_owned(),
+                        version: crate::cartographer::parse_version(reported).unwrap(),
+                        reported: reported.to_owned(),
+                        held_back: None,
+                    }),
+                )]
+                .into(),
+            },
+        )
+    }
+
+    fn run_cartographer(
+        can: Option<u64>,
+        versions: &TargetVersions,
+        workspace: &RunWorkspace,
+    ) -> RunFailure {
+        let runner = InactiveKlipper::default();
+        let coordinator = BuildCoordinator::new("/nonexistent", runner.clone(), runner);
+        run_updates(
+            &coordinator,
+            &Printer(PrintState::Standby),
+            &McuInventory {
+                mcus: vec![cartographer_mcu(can)],
+                unreported: Vec::new(),
+            },
+            workspace,
+            RunRequest {
+                targets: &["mcu cartographer".to_owned()],
+                target_versions: versions,
+                foci_releases: &NoReleases,
+                clean: false,
+            },
+            &mut approving(),
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn reads_the_cartographer_image_and_sends_it_to_katapult_over_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = RunWorkspace::create(dir.path().join("run")).unwrap();
+        let image = dir.path().join("can_1m_full.bin");
+        std::fs::write(
+            &image,
+            cartographer_image("CARTOGRAPHER v4 6.2.0", Some(1_000_000)),
+        )
+        .unwrap();
+
+        let failure = run_cartographer(
+            Some(1_000_000),
+            &cartographer_targets(&image, "CARTOGRAPHER v4 6.2.0"),
+            &workspace,
+        );
+
+        let paths = workspace.build_paths("mcu cartographer").unwrap();
+        assert_eq!(
+            std::fs::read(paths.artifact_path.with_file_name("can_1m_full.bin")).unwrap(),
+            std::fs::read(&image).unwrap(),
+            "the run keeps the image it flashed"
+        );
+        assert!(
+            failure
+                .detail
+                .starts_with("could not open the configured CAN interface"),
+            "{}",
+            failure.detail
+        );
+    }
+
+    #[test]
+    fn refuses_a_cartographer_image_that_changed_or_does_not_suit_the_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = RunWorkspace::create(dir.path().join("run")).unwrap();
+        let image = dir.path().join("can_1m_full.bin");
+
+        std::fs::write(
+            &image,
+            cartographer_image("CARTOGRAPHER v4 6.2.0 Lite", Some(1_000_000)),
+        )
+        .unwrap();
+        let changed = run_cartographer(
+            Some(1_000_000),
+            &cartographer_targets(&image, "CARTOGRAPHER v4 6.2.0"),
+            &workspace,
+        );
+        assert_eq!(
+            changed.detail,
+            format!(
+                "{} now holds \"CARTOGRAPHER v4 6.2.0 Lite\", not the \"CARTOGRAPHER v4 6.2.0\" \
+                 mcu cartographer was to be updated to",
+                image.display()
+            )
+        );
+        assert!(
+            changed
+                .message
+                .ends_with("Klipper has been left in its state from before this update"),
+            "{}",
+            changed.message
+        );
+
+        std::fs::write(
+            &image,
+            cartographer_image("CARTOGRAPHER v4 6.2.0", Some(500_000)),
+        )
+        .unwrap();
+        let wrong_bitrate = run_cartographer(
+            Some(1_000_000),
+            &cartographer_targets(&image, "CARTOGRAPHER v4 6.2.0"),
+            &workspace,
+        );
+        assert_eq!(
+            wrong_bitrate.detail,
+            format!(
+                "refusing {} for mcu cartographer: it is built for CAN at 500000 bit/s, and the \
+                 probe runs CAN at 1000000 bit/s",
+                image.display()
+            )
+        );
+
+        let unknown = run_cartographer(None, &TargetVersions::indeterminate(), &workspace);
+        assert_eq!(
+            unknown.detail,
+            "no Cartographer firmware image is known to update mcu cartographer with"
         );
     }
 
