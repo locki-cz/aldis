@@ -176,7 +176,7 @@ flashes only after it has. Requirements:
 
 `flash` accepts only a Beacon `.dfu` image for a Beacon, including one whose version `aldis` cannot compare (such as a beta), and sends it through the same route. The agent compares Beacons with their images and offers to update outdated ones.
 
-A Beacon left in its bootloader (for example by an interrupted flash) can only leave it by being flashed. `aldis reboot` finds it on USB and, after asking, flashes the image for the revision its bootloader names, from the same checkout (`--beacon-source` names another). It flashes nothing when the checkout's image is not for that bootloader. Restart Klipper afterwards (`FIRMWARE_RESTART`) so it reconnects the Beacon.
+A Beacon left in its bootloader (for example by an interrupted flash) can only leave it by being flashed. `aldis reboot` finds it on USB and, after asking, flashes the image for the revision its bootloader names, from the same checkout (`--beacon-source` names another). It flashes nothing when the checkout's image is not for that bootloader. Once the Beacon's serial port is back, it offers to restart Klipper (`FIRMWARE_RESTART`, without asking under `--yes`) so Klipper reconnects it; only a Klipper on this host (`--moonraker`, `http://127.0.0.1:7125` by default) that is not `ready` is restarted.
 
 ## Cartographer
 
