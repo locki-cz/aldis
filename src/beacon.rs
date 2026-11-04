@@ -104,6 +104,18 @@ pub fn identify(mcu: &Mcu) -> Option<Firmware> {
     Some(Firmware { version })
 }
 
+/// Whether `mcu` names itself Beacon, including with a version aldis cannot compare (such as a
+/// beta). Its firmware is still flashed only through Beacon's bootloader.
+pub fn names_itself_beacon(mcu: &Mcu) -> bool {
+    let app = mcu.app.as_deref().map(str::trim).unwrap_or_default();
+    (app.is_empty() || app.eq_ignore_ascii_case(NAME))
+        && mcu
+            .version
+            .as_deref()
+            .and_then(|version| version.split_whitespace().next())
+            .is_some_and(|word| word.eq_ignore_ascii_case(NAME))
+}
+
 /// How a running Beacon compares with the image in the checkout. As upstream, any difference is
 /// an update, including to an older image.
 pub fn compare(running: &Version, target: &Version) -> RevisionStatus {

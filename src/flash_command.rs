@@ -205,7 +205,8 @@ fn confirmation_prompt(target: &str, firmware: &Path, byte_count: usize) -> Stri
     )
 }
 
-/// The Beacon image `firmware` holds when `target` is a Beacon; `None` for any other MCU.
+/// The Beacon image `firmware` holds when `target` is a Beacon, including one whose version
+/// aldis cannot compare; `None` for any other MCU.
 fn beacon_image(
     inventory: &McuInventory,
     target: &str,
@@ -214,7 +215,7 @@ fn beacon_image(
     let Some(mcu) = inventory.mcus.iter().find(|mcu| mcu.name == target) else {
         return Ok(None);
     };
-    if !aldis::beacon::is_beacon(mcu) {
+    if !aldis::beacon::names_itself_beacon(mcu) {
         return Ok(None);
     }
     aldis::beacon::parse_image(firmware).map(Some)
@@ -304,6 +305,12 @@ mod tests {
             Err(aldis::beacon::ImageError::NoSuffix)
         );
         assert_eq!(beacon_image(&inventory, "mcu other", b"anything"), Ok(None));
+        inventory.mcus[0].version = Some("Beacon 2.2.0-beta".to_owned());
+        assert_eq!(
+            beacon_image(&inventory, "mcu xiao", b"\x00\x10\x00\x20 plain binary"),
+            Err(aldis::beacon::ImageError::NoSuffix),
+            "a Beacon whose version aldis cannot compare still takes only a Beacon image"
+        );
         assert_eq!(
             beacon_image(
                 &inventory_with("CONFIG_MACH_STM32=y\n"),

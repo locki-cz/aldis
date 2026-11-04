@@ -346,3 +346,34 @@ fn reports_a_corrupt_image_in_the_checkout() {
         "revh.dfu is not a Beacon firmware image: its DFU suffix checksum does not match its contents"
     ));
 }
+
+#[test]
+fn names_a_beacon_even_when_its_version_cannot_be_compared() {
+    use aldis::beacon::names_itself_beacon;
+
+    assert!(names_itself_beacon(&beacon_mcu(
+        "mcu beacon",
+        Some(""),
+        "Beacon 2.1.0"
+    )));
+    assert!(names_itself_beacon(&beacon_mcu(
+        "mcu beacon",
+        None,
+        "Beacon 2.2.0-beta"
+    )));
+    assert!(names_itself_beacon(&beacon_mcu(
+        "mcu beacon",
+        Some("Beacon"),
+        "BEACON"
+    )));
+    assert!(!names_itself_beacon(&beacon_mcu(
+        "mcu beacon",
+        Some("Klipper"),
+        "Beacon 2.1.0"
+    )));
+    assert!(!names_itself_beacon(&beacon_mcu(
+        "mcu beacon",
+        Some(""),
+        "Cartographer 2.1.0"
+    )));
+}
