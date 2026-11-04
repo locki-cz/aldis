@@ -48,6 +48,17 @@ fn run_flash(mut arguments: FlashArgs, ui: &mut UpdateUi) -> anyhow::Result<()> 
         ui.action(&format!("error: {reason}"));
         anyhow::bail!(reason);
     }
+    // A Beacon takes only a Beacon DFU image, sent to its own bootloader; refuse anything else
+    // before the Beacon is touched.
+    let beacon_image = beacon_image(&inventory, &arguments.target, &firmware)
+        .with_context(|| {
+            format!(
+                "refusing to flash {}: {} is not a Beacon firmware image",
+                arguments.target,
+                arguments.firmware.display()
+            )
+        })
+        .inspect_err(|error| ui.action(&format!("error: {error:#}")))?;
 
     crate::update::bridge_refusal(
         arguments.config.as_deref(),
@@ -97,15 +108,20 @@ fn run_flash(mut arguments: FlashArgs, ui: &mut UpdateUi) -> anyhow::Result<()> 
     let foci_board = aldis::foci::is_foci(mcu)
         .then(|| aldis::foci::Board::from_mcu(&mcu.mcu))
         .flatten();
-    let flashed = match foci_board {
-        Some(board) => coordinator.flash_prebuilt_with_progress(
+    let flashed = match (beacon_image, foci_board) {
+        (Some(image), _) => {
+            coordinator.flash_beacon_with_progress(pending.approve(), &image, options, |progress| {
+                ui.progress_without_build(progress)
+            })
+        }
+        (None, Some(board)) => coordinator.flash_prebuilt_with_progress(
             pending.approve(),
             &firmware,
             board.application_start(),
             options,
             |progress| ui.progress_without_build(progress),
         ),
-        None => coordinator.flash_firmware_system_with_progress(
+        (None, None) => coordinator.flash_firmware_system_with_progress(
             pending.approve(),
             &firmware,
             options,
@@ -189,6 +205,21 @@ fn confirmation_prompt(target: &str, firmware: &Path, byte_count: usize) -> Stri
     )
 }
 
+/// The Beacon image `firmware` holds when `target` is a Beacon; `None` for any other MCU.
+fn beacon_image(
+    inventory: &McuInventory,
+    target: &str,
+    firmware: &[u8],
+) -> Result<Option<aldis::beacon::FirmwareImage>, aldis::beacon::ImageError> {
+    let Some(mcu) = inventory.mcus.iter().find(|mcu| mcu.name == target) else {
+        return Ok(None);
+    };
+    if !aldis::beacon::is_beacon(mcu) {
+        return Ok(None);
+    }
+    aldis::beacon::parse_image(firmware).map(Some)
+}
+
 fn flash_refusal(inventory: &McuInventory, target: &str) -> Option<String> {
     let mcu = inventory.mcus.iter().find(|mcu| mcu.name == target)?;
     if aldis::foci::is_foci(mcu) && aldis::foci::Board::from_mcu(&mcu.mcu).is_none() {
@@ -210,7 +241,7 @@ fn flash_refusal(inventory: &McuInventory, target: &str) -> Option<String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{confirmation_prompt, flash_refusal};
+    use super::{beacon_image, confirmation_prompt, flash_refusal};
     use aldis::moonraker::{Mcu, McuInventory};
     use aldis::update_run::{Operation, failure_message};
 
@@ -259,6 +290,29 @@ mod tests {
 
         inventory.mcus[0].mcu = "stm32h723xx".to_owned();
         assert_eq!(flash_refusal(&inventory, "mcu xiao"), None);
+    }
+
+    #[test]
+    fn takes_only_a_beacon_dfu_image_for_a_beacon() {
+        let mut inventory = inventory_with("");
+        let beacon = &mut inventory.mcus[0];
+        beacon.app = Some(String::new());
+        beacon.version = Some("Beacon 2.0.1".to_owned());
+
+        assert_eq!(
+            beacon_image(&inventory, "mcu xiao", b"\x00\x10\x00\x20 plain binary"),
+            Err(aldis::beacon::ImageError::NoSuffix)
+        );
+        assert_eq!(beacon_image(&inventory, "mcu other", b"anything"), Ok(None));
+        assert_eq!(
+            beacon_image(
+                &inventory_with("CONFIG_MACH_STM32=y\n"),
+                "mcu xiao",
+                b"anything"
+            ),
+            Ok(None),
+            "other MCUs take any file"
+        );
     }
 
     #[test]
