@@ -8,6 +8,7 @@ use crate::eligibility::{
 };
 use crate::flash_order::is_usb_can_bridge;
 use crate::fleet::peer::{PeerState, check_bridge};
+use crate::foci::Release;
 use crate::moonraker::{
     HostInfo, KlippyState, McuInventory, McuTransport, PrintState, UnreportedReason,
 };
@@ -34,6 +35,8 @@ pub struct Snapshot {
     pub inventory: Option<McuInventory>,
     /// The other printers on this host, as last read; only consulted for USB-CAN bridge updates.
     pub peers: Vec<PeerState>,
+    /// The latest FOCI release; `None` without a FOCI MCU or when it could not be looked up.
+    pub foci_release: Option<Release>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -283,7 +286,8 @@ pub fn assess(snapshot: &Snapshot) -> StatusBody {
         software
             .clone()
             .map_or(CheckoutRevision::Indeterminate, CheckoutRevision::Known),
-    );
+    )
+    .with_foci_release(snapshot.foci_release.clone());
     let software_label = software.as_deref().unwrap_or("unknown");
     let mut mcus = Vec::new();
     if let Some(inventory) = &snapshot.inventory {
@@ -305,11 +309,28 @@ pub fn assess(snapshot: &Snapshot) -> StatusBody {
                 (Eligibility::ExternallyManaged(app), _) => {
                     (McuState::ExternallyManaged, format!("managed by {app}"))
                 }
-                // The agent does not look up FOCI releases; `aldis update` updates FOCI.
-                (Eligibility::Foci(_), _) => (
-                    McuState::ExternallyManaged,
-                    format!("running FOCI {running}; update it with `aldis update`"),
-                ),
+                (Eligibility::Foci(_), Some(RevisionStatus::Current)) => {
+                    (McuState::Current, format!("running {running}"))
+                }
+                (Eligibility::Foci(_), revision) => match &snapshot.foci_release {
+                    Some(release) if revision == Some(RevisionStatus::UpdateRequired) => (
+                        McuState::UpdateAvailable,
+                        format!("running {running}, FOCI release is {}", release.tag),
+                    ),
+                    Some(release) => (
+                        McuState::Indeterminate,
+                        format!(
+                            "cannot compare running {running} with FOCI release {}",
+                            release.tag
+                        ),
+                    ),
+                    None => (
+                        McuState::Indeterminate,
+                        format!(
+                            "running {running}; the latest FOCI release could not be looked up"
+                        ),
+                    ),
+                },
                 (Eligibility::Unsupported(UnsupportedReason::Foci(reason)), _) => {
                     (McuState::ExternallyManaged, reason.to_string())
                 }
@@ -432,6 +453,7 @@ mod tests {
                 }],
             }),
             peers: Vec::new(),
+            foci_release: None,
         }
     }
 
@@ -455,30 +477,87 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reports_foci_as_updated_from_the_command_line_only() {
-        let mut snapshot = ready_snapshot();
-        let mcus = &mut snapshot.inventory.as_mut().unwrap().mcus;
-        let mut foci = mcu("mcu ouroboros", "v0.4.0-0-g0fb68e1b", "");
+    fn with_foci(mut snapshot: Snapshot, version: &str, features: &str) -> Snapshot {
+        let mut foci = mcu("mcu ouroboros", version, "");
         foci.app = Some("FOCI".to_owned());
-        foci.build_versions = Some("rust=1.98.1 features=none board=0fb68e1b".to_owned());
-        mcus.push(foci.clone());
-        foci.name = "mcu dev".to_owned();
-        foci.build_versions = Some("rust=1.98.1 features=dev board=0fb68e1b".to_owned());
-        mcus.push(foci);
+        foci.build_versions = Some(format!("rust=1.98.1 features={features} board=0fb68e1b"));
+        snapshot.inventory.as_mut().unwrap().mcus.push(foci);
+        snapshot
+    }
 
-        let body = assess(&snapshot);
-        let entry = |name: &str| body.mcus.iter().find(|entry| entry.name == name).unwrap();
+    fn foci_entry(snapshot: &Snapshot) -> McuEntry {
+        assess(snapshot)
+            .mcus
+            .into_iter()
+            .find(|entry| entry.name == "ouroboros")
+            .unwrap()
+    }
 
-        assert_eq!(entry("ouroboros").state, McuState::ExternallyManaged);
-        assert!(entry("ouroboros").actions.is_empty());
+    #[test]
+    fn offers_an_update_for_a_foci_mcu_behind_the_foci_release() {
+        let mut snapshot = with_foci(ready_snapshot(), "v0.4.0-0-g0fb68e1b", "none");
+        snapshot.foci_release = Release::from_tag("v0.4.1");
+
+        let entry = foci_entry(&snapshot);
+
+        assert_eq!(entry.state, McuState::UpdateAvailable);
+        assert_eq!(entry.actions, vec![Action::Update]);
         assert_eq!(
-            entry("ouroboros").message,
-            "running FOCI v0.4.0-0-g0fb68e1b; update it with `aldis update`"
+            entry.message,
+            "running v0.4.0-0-g0fb68e1b, FOCI release is v0.4.1"
         );
-        assert_eq!(entry("dev").state, McuState::ExternallyManaged);
+
+        snapshot.host.print_state = Some(PrintState::Printing);
+        assert!(
+            foci_entry(&snapshot).actions.is_empty(),
+            "a blocker withholds FOCI updates too"
+        );
+    }
+
+    #[test]
+    fn reports_a_foci_mcu_at_the_release_as_current() {
+        let mut snapshot = with_foci(ready_snapshot(), "v0.4.1-0-ga82de21d", "none");
+        snapshot.foci_release = Release::from_tag("v0.4.1");
+
+        let entry = foci_entry(&snapshot);
+
+        assert_eq!(entry.state, McuState::Current);
+        assert!(entry.actions.is_empty());
+        assert_eq!(entry.message, "running v0.4.1-0-ga82de21d");
+    }
+
+    #[test]
+    fn cannot_compare_a_foci_dev_build_or_one_without_a_known_release() {
+        let mut snapshot = with_foci(ready_snapshot(), "v0.4.0-3-gabcdef12", "none");
+        snapshot.foci_release = Release::from_tag("v0.4.1");
+        let dev = foci_entry(&snapshot);
+        assert_eq!(dev.state, McuState::Indeterminate);
+        assert!(dev.actions.is_empty());
         assert_eq!(
-            entry("dev").message,
+            dev.message,
+            "cannot compare running v0.4.0-3-gabcdef12 with FOCI release v0.4.1"
+        );
+
+        let unknown = foci_entry(&with_foci(ready_snapshot(), "v0.4.0-0-g0fb68e1b", "none"));
+        assert_eq!(unknown.state, McuState::Indeterminate);
+        assert!(unknown.actions.is_empty());
+        assert_eq!(
+            unknown.message,
+            "running v0.4.0-0-g0fb68e1b; the latest FOCI release could not be looked up"
+        );
+    }
+
+    #[test]
+    fn reports_a_foci_build_no_release_matches_as_externally_managed() {
+        let mut snapshot = with_foci(ready_snapshot(), "v0.4.0-0-g0fb68e1b", "dev");
+        snapshot.foci_release = Release::from_tag("v0.4.1");
+
+        let entry = foci_entry(&snapshot);
+
+        assert_eq!(entry.state, McuState::ExternallyManaged);
+        assert!(entry.actions.is_empty());
+        assert_eq!(
+            entry.message,
             "FOCI build features \"dev\" match no release flavor"
         );
     }

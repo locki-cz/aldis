@@ -36,6 +36,7 @@ impl AgentBackend for Idle {
                 unreported: Vec::new(),
             }),
             peers: Vec::new(),
+            foci_release: None,
         }
     }
     fn try_lock(&self) -> Result<UpdateLock, LockError> {
