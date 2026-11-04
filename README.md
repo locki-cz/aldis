@@ -109,7 +109,8 @@ These bootloaders are entered and flashed unattended, directly from the running 
 - **PicoBoot** (RP2040/RP2350, `2e8a:0003`/`2e8a:000f`)
 - **SAM-BA** on SAMD21 (the Seeed XIAO SAMD21's UF2 bootloader, `2886:002f`)
 
-FOCI firmware is flashed through Katapult only; see [FOCI](#foci).
+FOCI firmware is flashed through Katapult only; see [FOCI](#foci). Beacon firmware is flashed
+through Beacon's own DFU bootloader only; see [Beacon](#beacon).
 
 Every other bootloader identity is reported as unsupported rather than guessed at. MCUs whose
 firmware configuration names a family none of these bootloaders run on (Katapult builds only for
@@ -149,6 +150,20 @@ flashes only after it has. Requirements:
 - Keep the `klipper-foci` host module in step with the firmware: update it (for example through Moonraker's update manager) before updating the firmware, including before `update --auto`.
 
 `flash` sends a firmware file for a FOCI MCU through the same Katapult-only path. The agent compares FOCI MCUs with the latest release and offers to update outdated ones; it asks GitHub at most once an hour (every five minutes while lookups fail).
+
+## Beacon
+
+[Beacon](https://github.com/beacon3d/beacon_klipper) probes are not built from the Klipper checkout either. Their firmware ships as one image per hardware revision (`firmware/rev<x>.dfu`) in the `beacon_klipper` checkout, which is updated with `git pull`. `aldis` flashes a Beacon with the image for its revision from that checkout:
+
+- The checkout is the one Beacon's installer linked `klippy/extras/beacon.py` from in the Klipper checkout, otherwise `~/beacon_klipper`. Name another with `--beacon-source` (or `ALDIS_BEACON_SOURCE`). `status` shows it as `Beacon firmware`.
+- A Beacon is recognized by the version it reports (`Beacon 2.1.0`). Its revision comes from the USB product name of the device behind its configured `serial:` (`Beacon RevH` takes `revh.dfu`), and the image's version from its DFU suffix, whose checksum must match.
+- As with Beacon's own `update_firmware.py`, any difference between the running version and the image counts as an update, so checking out an older `beacon_klipper` commit downgrades.
+- The update reads the image right before flashing it and refuses it if the checkout now holds another version than the one approved. It keeps a copy in the run workspace.
+- The Beacon is asked into its bootloader with a 1200-baud touch, and the image is downloaded with plain USB DFU only to a bootloader its DFU suffix names (`04d8:beac` or `04d8:bea1`). A Beacon on another transport is refused before it is touched. The image is encrypted, so it cannot be read back; success is confirmed by the Beacon reporting the image's version after Klipper restarts.
+- The images are Beacon's and not freely redistributable, so `aldis` only ever reads them from your own checkout. It never downloads or copies them anywhere else.
+- `aldis setup` grants access to the Beacon bootloader; rerun it after upgrading `aldis`.
+
+`flash` accepts only a Beacon `.dfu` image for a Beacon, and sends it through the same route. The agent compares Beacons with their images and offers to update outdated ones.
 
 ## License
 
