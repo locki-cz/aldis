@@ -309,6 +309,10 @@ pub fn assess(snapshot: &Snapshot) -> StatusBody {
                 (Eligibility::ExternallyManaged(app), _) => {
                     (McuState::ExternallyManaged, format!("managed by {app}"))
                 }
+                // The agent does not look for Beacon images yet.
+                (Eligibility::Beacon(_), _) => {
+                    (McuState::ExternallyManaged, "managed by Beacon".to_owned())
+                }
                 (Eligibility::Foci(_), Some(RevisionStatus::Current)) => {
                     (McuState::Current, format!("running {running}"))
                 }

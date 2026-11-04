@@ -100,11 +100,20 @@ fn treats_a_klipper_version_at_or_above_the_minimum_as_eligible() {
 
 #[test]
 fn names_third_party_firmware_from_its_version_when_app_is_blank() {
-    // Beacon reports `app` as an empty string rather than omitting it, and names itself in
-    // `mcu_version` (e.g. "Beacon 2.1.0") instead of a git-describe-shaped version.
+    // Older Cartographer builds report no `app` and name themselves in `mcu_version` instead
+    // of a git-describe-shaped version.
     assert_eq!(
         assess_mcu(
-            &mcu(Some(""), Some("Beacon 2.1.0"), ""),
+            &mcu(Some(""), Some("CARTOGRAPHER V4 5.1.0"), ""),
+            &TargetVersions::klipper(CheckoutRevision::Known("v1".to_owned()))
+        )
+        .eligibility,
+        Eligibility::ExternallyManaged("CARTOGRAPHER".to_owned())
+    );
+    // A Beacon whose version cannot be compared stays externally managed.
+    assert_eq!(
+        assess_mcu(
+            &mcu(Some(""), Some("Beacon 2.1.0-beta"), ""),
             &TargetVersions::klipper(CheckoutRevision::Known("v1".to_owned()))
         )
         .eligibility,
@@ -446,4 +455,95 @@ fn targets_and_confirms_foci_mcus_by_the_foci_release() {
         unknown.reached_by(&foci("v0.4.0-0-g0fb68e1b", FOCI_PROD)),
         None
     );
+}
+
+fn beacon(version: &str) -> Mcu {
+    let mut beacon = mcu(Some(""), Some(version), "");
+    beacon.name = "mcu beacon".to_owned();
+    beacon
+}
+
+fn beacon_target(bcd: u16) -> TargetVersions {
+    let target = aldis::beacon::Target {
+        revision: "h".to_owned(),
+        path: std::path::PathBuf::from("/home/pi/beacon_klipper/firmware/revh.dfu"),
+        version: aldis::beacon::Version::from_bcd(bcd),
+    };
+    TargetVersions::klipper(CheckoutRevision::Known("v0.13.0-770-gce7002bed".to_owned()))
+        .with_beacon_targets(aldis::beacon::Targets {
+            checkout: Some(std::path::PathBuf::from("/home/pi/beacon_klipper")),
+            mcus: [("mcu beacon".to_owned(), Ok(target))].into(),
+        })
+}
+
+#[test]
+fn compares_a_beacon_with_the_image_for_its_revision() {
+    let running = beacon("Beacon 2.0.1");
+
+    let outdated = assess_mcu(&running, &beacon_target(0x2010));
+    assert_eq!(
+        outdated.eligibility,
+        Eligibility::Beacon(aldis::beacon::Firmware {
+            version: aldis::beacon::Version::from_bcd(0x2001)
+        })
+    );
+    assert_eq!(outdated.revision, Some(RevisionStatus::UpdateRequired));
+    assert_eq!(
+        assess_mcu(&running, &beacon_target(0x2001)).revision,
+        Some(RevisionStatus::Current)
+    );
+    assert_eq!(
+        assess_mcu(&running, &beacon_target(0x2000)).revision,
+        Some(RevisionStatus::UpdateRequired),
+        "an older image downgrades, as upstream does"
+    );
+    let unknown = TargetVersions::klipper(CheckoutRevision::Known("Beacon 2.0.1".to_owned()));
+    assert_eq!(
+        assess_mcu(&running, &unknown).revision,
+        Some(RevisionStatus::Indeterminate),
+        "the Klipper checkout is no target for a Beacon"
+    );
+}
+
+#[test]
+fn selects_a_beacon_only_with_a_known_image() {
+    let outdated = beacon("Beacon 2.0.1");
+    let current = beacon("Beacon 2.1.0");
+    let versions = beacon_target(0x2010);
+
+    assert!(is_selected(
+        &outdated,
+        &versions,
+        &UpdateSelection::Required
+    ));
+    assert!(!is_selected(
+        &current,
+        &versions,
+        &UpdateSelection::Required
+    ));
+    assert!(is_selected(&current, &versions, &UpdateSelection::All));
+    assert!(!is_selected(
+        &current,
+        &TargetVersions::indeterminate(),
+        &UpdateSelection::All
+    ));
+    let mut other = outdated.clone();
+    other.name = "mcu beacon sensor rear".to_owned();
+    assert!(
+        !is_selected(&other, &versions, &UpdateSelection::All),
+        "each Beacon needs its own image"
+    );
+}
+
+#[test]
+fn targets_and_confirms_a_beacon_by_its_image_version() {
+    let versions = beacon_target(0x2010);
+
+    assert_eq!(versions.label_for(&beacon("Beacon 2.0.1")), "Beacon 2.1.0");
+    assert_eq!(versions.reached_by(&beacon("Beacon 2.1.0")), Some(true));
+    assert_eq!(versions.reached_by(&beacon("Beacon 2.0.1")), Some(false));
+
+    let unknown = TargetVersions::indeterminate();
+    assert_eq!(unknown.label_for(&beacon("Beacon 2.0.1")), "unknown");
+    assert_eq!(unknown.reached_by(&beacon("Beacon 2.0.1")), None);
 }

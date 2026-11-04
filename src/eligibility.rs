@@ -1,5 +1,6 @@
 //! Read-only MCU update eligibility and revision comparison.
 
+use crate::beacon;
 use crate::foci;
 use crate::moonraker::Mcu;
 
@@ -11,6 +12,9 @@ pub enum Eligibility {
     /// A FOCI release build this updater can replace with the same board's and flavor's build
     /// from a FOCI release.
     Foci(foci::Firmware),
+    /// A Beacon this updater can flash with the image for its revision from the user's
+    /// `beacon_klipper` checkout.
+    Beacon(beacon::Firmware),
     /// Firmware managed by another project, named as Moonraker reported it (e.g. "Beacon").
     ExternallyManaged(String),
     /// Legacy or unidentified Klipper-family firmware without required updater metadata.
@@ -96,6 +100,8 @@ pub struct TargetVersions {
     pub klipper: CheckoutRevision,
     /// The FOCI release FOCI MCUs are updated to; `None` when it is not known.
     pub foci: Option<foci::Release>,
+    /// The image each Beacon is updated to, or why none is known.
+    pub beacon: beacon::Targets,
 }
 
 impl TargetVersions {
@@ -104,6 +110,7 @@ impl TargetVersions {
         Self {
             klipper: checkout,
             foci: None,
+            beacon: beacon::Targets::default(),
         }
     }
 
@@ -115,24 +122,45 @@ impl TargetVersions {
         }
     }
 
+    /// These targets with each Beacon updated to its image in `targets`.
+    pub fn with_beacon_targets(self, targets: beacon::Targets) -> Self {
+        Self {
+            beacon: targets,
+            ..self
+        }
+    }
+
     /// Targets nothing is compared against, for a run that only verifies reconnection.
     pub fn indeterminate() -> Self {
         Self::klipper(CheckoutRevision::Indeterminate)
     }
 
     /// The target `mcu` is updated to, for display; `unknown` when indeterminate.
-    pub fn label_for(&self, mcu: &Mcu) -> &str {
+    pub fn label_for(&self, mcu: &Mcu) -> String {
         if foci::is_foci(mcu) {
             return self
                 .foci
                 .as_ref()
-                .map_or("unknown", |release| release.tag.as_str());
+                .map_or("unknown", |release| release.tag.as_str())
+                .to_owned();
         }
-        self.klipper.label()
+        if beacon::is_beacon(mcu) {
+            return self
+                .beacon
+                .target(&mcu.name)
+                .map_or_else(|| "unknown".to_owned(), |target| target.version.reported());
+        }
+        self.klipper.label().to_owned()
     }
 
     /// Whether `mcu` runs its target: `None` when there is no known target to check against.
     pub fn reached_by(&self, mcu: &Mcu) -> Option<bool> {
+        if beacon::is_beacon(mcu) {
+            let target = self.beacon.target(&mcu.name)?;
+            return Some(
+                beacon::identify(mcu).is_some_and(|firmware| firmware.version == target.version),
+            );
+        }
         if foci::is_foci(mcu) {
             let release = self.foci.as_ref()?;
             return Some(foci::identify(mcu).is_ok_and(|firmware| {
@@ -176,6 +204,8 @@ pub fn is_selected(mcu: &Mcu, versions: &TargetVersions, selection: &UpdateSelec
         Eligibility::Eligible => true,
         // A FOCI MCU is updated to the FOCI release, so even `All` needs one to be known.
         Eligibility::Foci(_) => versions.foci.is_some(),
+        // A Beacon is flashed with its image from the checkout, which must have been found.
+        Eligibility::Beacon(_) => versions.beacon.target(&mcu.name).is_some(),
         _ => false,
     };
     if !updatable {
@@ -206,6 +236,14 @@ pub fn assess_mcu(mcu: &Mcu, versions: &TargetVersions) -> McuStatus {
                 .as_ref()
                 .map_or(RevisionStatus::Indeterminate, |release| {
                     foci::compare(&firmware.version, release)
+                }),
+        ),
+        Eligibility::Beacon(firmware) => Some(
+            versions
+                .beacon
+                .target(&mcu.name)
+                .map_or(RevisionStatus::Indeterminate, |target| {
+                    beacon::compare(&firmware.version, &target.version)
                 }),
         ),
         _ => None,
@@ -267,6 +305,9 @@ fn is_klipper_build_timestamp(candidate: &str) -> bool {
 
 /// Classifies eligibility without inferring from MCU family or transport.
 pub fn classify_mcu(mcu: &Mcu) -> Eligibility {
+    if let Some(firmware) = beacon::identify(mcu) {
+        return Eligibility::Beacon(firmware);
+    }
     // Real Klipper and Kalico always populate `app`; third-party firmware such as Beacon
     // reports it as an empty string instead of omitting it, so treat blank the same as absent.
     match mcu

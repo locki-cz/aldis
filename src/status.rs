@@ -26,6 +26,7 @@ pub(crate) fn status(arguments: ConnectionArgs) -> ExitCode {
         &aldis::foci::GithubReleases::new(),
         versions,
         &source,
+        arguments.beacon_source.as_deref(),
     ) {
         Ok(report) => {
             print!("{report}");
@@ -41,12 +42,19 @@ fn status_report(
     releases: &impl aldis::foci::ReleasePort,
     versions: TargetVersions,
     source: &std::path::Path,
+    beacon_source: Option<&std::path::Path>,
 ) -> anyhow::Result<String> {
     tracing::info!("discovering MCUs from Moonraker");
     let mut inventory =
         crate::discovery::discover_mcus_with_retry(moonraker).context("failed to discover MCUs")?;
     crate::discovery::probe_unreported(url, moonraker, &mut inventory);
-    let versions = versions.with_foci_release(crate::discovery::foci_release(&inventory, releases));
+    let versions = versions
+        .with_foci_release(crate::discovery::foci_release(&inventory, releases))
+        .with_beacon_targets(aldis::beacon::targets_for(
+            &inventory,
+            beacon_source,
+            Some(source),
+        ));
     Ok(format_status(source, &versions, &inventory, None))
 }
 
@@ -71,6 +79,15 @@ pub(crate) fn format_status(
                 .map_or("unknown", |release| release.tag.as_str())
         ));
     }
+    if inventory.mcus.iter().any(aldis::beacon::is_beacon) {
+        output.push_str(&format!(
+            "Beacon firmware:   {}\n",
+            versions.beacon.checkout.as_ref().map_or_else(
+                || "no beacon_klipper checkout found".to_owned(),
+                |checkout| checkout.display().to_string()
+            )
+        ));
+    }
     for mcu in &inventory.mcus {
         let status = assess_mcu(mcu, versions);
         output.push_str(&format!("\n{}\n", mcu.name));
@@ -82,7 +99,10 @@ pub(crate) fn format_status(
             ),
             ("model:", mcu.mcu.clone()),
             ("connection:", connection_label(mcu.transport.as_ref())),
-            ("supported:", supported_label(&status.eligibility)),
+            (
+                "supported:",
+                supported_label(mcu, &status.eligibility, versions),
+            ),
             ("needs update:", update_label(status.revision)),
         ] {
             output.push_str(&format!("  {label:<13} {value}\n"));
@@ -104,8 +124,10 @@ pub(crate) fn format_status(
 }
 
 fn firmware_label(mcu: &aldis::moonraker::Mcu, eligibility: &Eligibility) -> String {
-    if let Eligibility::ExternallyManaged(name) = eligibility {
-        return name.clone();
+    match eligibility {
+        Eligibility::ExternallyManaged(name) => return name.clone(),
+        Eligibility::Beacon(_) => return "Beacon".to_owned(),
+        _ => {}
     }
     if let Some(app) = mcu.app.as_deref().filter(|app| !app.trim().is_empty()) {
         app.to_owned()
@@ -124,8 +146,24 @@ fn connection_label(transport: Option<&McuTransport>) -> String {
     }
 }
 
-fn supported_label(eligibility: &Eligibility) -> String {
+fn supported_label(
+    mcu: &aldis::moonraker::Mcu,
+    eligibility: &Eligibility,
+    versions: &TargetVersions,
+) -> String {
     match eligibility {
+        Eligibility::Beacon(_) => match versions.beacon.mcus.get(&mcu.name) {
+            Some(Ok(target)) => format!(
+                "yes ({} holds {})",
+                target.path.file_name().map_or_else(
+                    || target.path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned()
+                ),
+                target.version.reported()
+            ),
+            Some(Err(reason)) => format!("yes (no Beacon image known: {reason})"),
+            None => "yes (no Beacon image known)".to_owned(),
+        },
         Eligibility::Eligible => "yes".to_owned(),
         Eligibility::Foci(firmware) => format!(
             "yes (FOCI {} {} release builds)",
@@ -209,13 +247,11 @@ mod tests {
     fn folds_the_unsupported_reason_into_the_supported_line() {
         let inventory = McuInventory {
             mcus: vec![
-                // Beacon reports `app` as an empty string rather than omitting it, and
-                // names itself in `mcu_version` instead.
                 Mcu {
-                    name: "beacon".to_owned(),
-                    app: Some(String::new()),
-                    version: Some("Beacon 2.1.0".to_owned()),
-                    mcu: "beacon".to_owned(),
+                    name: "cartographer".to_owned(),
+                    app: Some("Cartographer".to_owned()),
+                    version: Some("CARTOGRAPHER V4 6.1.0".to_owned()),
+                    mcu: "stm32g431xx".to_owned(),
                     canbus_frequency_hz: None,
                     build_versions: None,
                     transport: None,
@@ -242,11 +278,96 @@ mod tests {
             None,
         );
 
-        assert!(output.contains("  firmware:     Beacon\n"));
-        assert!(output.contains("  supported:    no (third-party firmware: Beacon)\n"));
+        assert!(output.contains("  firmware:     Cartographer\n"));
+        assert!(output.contains("  supported:    no (third-party firmware: Cartographer)\n"));
         assert!(output.contains(
             "  supported:    no (Klipper version too old (v0.12.0-500-gdeadbeef < v0.13.0-753-g8c29c0a8e))\n"
         ));
+    }
+
+    #[test]
+    fn shows_the_beacon_checkout_and_the_image_each_beacon_takes() {
+        let beacon = |name: &str| Mcu {
+            name: name.to_owned(),
+            app: Some(String::new()),
+            version: Some("Beacon 2.0.1".to_owned()),
+            mcu: "samd21g18a".to_owned(),
+            canbus_frequency_hz: None,
+            build_versions: None,
+            transport: Some(McuTransport::Serial {
+                device: "/dev/serial/by-id/usb-Beacon_Beacon_RevH-if00".to_owned(),
+            }),
+            kconfig: String::new(),
+        };
+        let inventory = McuInventory {
+            mcus: vec![beacon("mcu beacon"), beacon("mcu beacon sensor rear")],
+            unreported: Vec::new(),
+        };
+        let checkout = std::path::PathBuf::from("/home/pi/beacon_klipper");
+        let versions = TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned()))
+            .with_beacon_targets(aldis::beacon::Targets {
+                checkout: Some(checkout.clone()),
+                mcus: [
+                    (
+                        "mcu beacon".to_owned(),
+                        Ok(aldis::beacon::Target {
+                            revision: "h".to_owned(),
+                            path: checkout.join("firmware/revh.dfu"),
+                            version: aldis::beacon::Version::from_bcd(0x2010),
+                        }),
+                    ),
+                    (
+                        "mcu beacon sensor rear".to_owned(),
+                        Err(aldis::beacon::Unavailable::UnknownRevision(
+                            "Beacon Classic".to_owned(),
+                        )),
+                    ),
+                ]
+                .into(),
+            });
+
+        let output = format_status(
+            std::path::Path::new("/home/pi/klipper"),
+            &versions,
+            &inventory,
+            None,
+        );
+
+        assert!(
+            output.contains("Beacon firmware:   /home/pi/beacon_klipper\n"),
+            "{output}"
+        );
+        assert!(
+            output.contains(concat!(
+                "mcu beacon\n",
+                "  firmware:     Beacon\n",
+                "  version:      Beacon 2.0.1\n",
+                "  model:        samd21g18a\n",
+                "  connection:   serial (/dev/serial/by-id/usb-Beacon_Beacon_RevH-if00)\n",
+                "  supported:    yes (revh.dfu holds Beacon 2.1.0)\n",
+                "  needs update: yes\n",
+            )),
+            "{output}"
+        );
+        assert!(
+            output.contains(concat!(
+                "  supported:    yes (no Beacon image known: its USB product name ",
+                "\"Beacon Classic\" names no Beacon revision)\n",
+                "  needs update: unknown\n",
+            )),
+            "{output}"
+        );
+
+        let missing = format_status(
+            std::path::Path::new("/home/pi/klipper"),
+            &TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
+            &inventory,
+            None,
+        );
+        assert!(
+            missing.contains("Beacon firmware:   no beacon_klipper checkout found\n"),
+            "{missing}"
+        );
     }
 
     #[test]
@@ -316,6 +437,7 @@ mod tests {
             &NoReleases,
             TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
             std::path::Path::new("/klipper"),
+            None,
         )
         .expect("status report should succeed");
 
@@ -332,6 +454,7 @@ mod tests {
             &NoReleases,
             TargetVersions::indeterminate(),
             std::path::Path::new("/klipper"),
+            None,
         )
         .expect_err("status report should fail");
 
@@ -356,6 +479,7 @@ mod tests {
                 &FakeReleases(releases),
                 TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
                 std::path::Path::new("/klipper"),
+                None,
             )
             .expect("status report should succeed")
         };
@@ -395,6 +519,7 @@ mod tests {
             &NoReleases,
             TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
             std::path::Path::new("/klipper"),
+            None,
         )
         .expect("status report should succeed");
 

@@ -403,7 +403,7 @@ pub fn run_updates<B: CommandPort, S: CommandPort>(
             ));
         };
         let current = mcu.version.as_deref().unwrap_or("unknown");
-        if !hooks.approve(name, current, request.target_versions.label_for(mcu)) {
+        if !hooks.approve(name, current, &request.target_versions.label_for(mcu)) {
             continue;
         }
         let pending = match coordinator.prepare(inventory, workspace, name, request.clean) {
