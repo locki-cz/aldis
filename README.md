@@ -148,7 +148,7 @@ flashes only after it has. Requirements:
 - The image is sent only to Katapult, over the board's USB serial device, and only when Katapult starts applications where the image is linked to run (`0x08020000` on Ouroboros, `0x08008000` on OpenFFBoard). Otherwise nothing is written and Katapult is asked to start the existing application.
 - Keep the `klipper-foci` host module in step with the firmware: update it (for example through Moonraker's update manager) before updating the firmware, including before `update --auto`.
 
-`flash` sends a firmware file for a FOCI MCU through the same Katapult-only path. The agent shows FOCI MCUs without an update action; update them with `update`.
+`flash` sends a firmware file for a FOCI MCU through the same Katapult-only path. The agent compares FOCI MCUs with the latest release and offers to update outdated ones; it asks GitHub at most once an hour (every five minutes while lookups fail).
 
 ## License
 

@@ -92,14 +92,20 @@ first one that applies wins):
 
 | State | Meaning | Actions |
 | --- | --- | --- |
-| `current` | Matches the running host | none |
-| `update_available` | Differs from the running host | `update` |
-| `indeterminate` | Revision cannot be compared | none |
-| `externally_managed` | Non-Klipper application (e.g. Beacon), or FOCI, which only `aldis update` updates; for a FOCI build no release matches, the message says why | none |
+| `current` | Matches the running host, or for FOCI, the latest FOCI release | none |
+| `update_available` | Differs from the running host, or for FOCI, is behind the latest FOCI release | `update` |
+| `indeterminate` | Revision cannot be compared, including a FOCI development build and a FOCI MCU while the latest release could not be looked up | none |
+| `externally_managed` | Non-Klipper application (e.g. Beacon), or a FOCI build no release matches (the message says why) | none |
 | `unsupported_legacy` | No embedded kconfig | none |
 | `unsupported_mcu` | The kconfig names an MCU family with no bootloader aldis can drive (e.g. SAMD51); the message names the family | none |
 | `not_identified` | Empty object; fallback not attempted (CAN, host MCU, or port held) | none |
 | `not_responding` | Empty object; no identify reply. Message points to `aldis reboot` or a power cycle | none |
+
+FOCI MCUs are compared with the latest FOCI release on GitHub, which the agent looks up at most
+once an hour (every five minutes while lookups fail), and only while a FOCI MCU is configured. A
+`status` or `update` request that triggers a lookup can take up to 10 s longer. A FOCI update
+downloads the release image instead of building, so its run reports `downloading firmware` and
+`downloaded firmware` in the `build` phase.
 
 Flashing a USB-CAN bridge resets its CAN bus, so the agent refuses while another printer on that
 bus is busy, starting up, or cannot be checked. The bridge MCU stays `update_available` but has
