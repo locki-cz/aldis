@@ -156,6 +156,19 @@ pub enum SystemFlashError {
     CanFlash(KatapultFlashError),
     /// Installing the Linux host MCU binary or restarting its service failed.
     LinuxHost(LinuxHostError),
+    /// Prebuilt firmware is sent only to Katapult on a USB serial device, and the MCU is
+    /// configured on some other transport.
+    KatapultUsbOnly {
+        /// The configured transport.
+        transport: String,
+    },
+    /// The bootloader that appeared is not Katapult, the only one prebuilt firmware is sent to.
+    NotKatapult {
+        /// The bootloader that appeared.
+        bootloader: &'static str,
+        /// The MCU transport that was asked to enter its bootloader.
+        transport: String,
+    },
 }
 
 impl fmt::Display for SystemFlashError {
@@ -272,6 +285,19 @@ impl fmt::Display for SystemFlashError {
             ),
             Self::LinuxHost(error) => write!(f, "{error}"),
             Self::MissingTransport => write!(f, "the MCU does not expose a configured transport"),
+            Self::KatapultUsbOnly { transport } => write!(
+                f,
+                "this firmware is flashed only through Katapult on a USB serial device, and the \
+                 MCU is configured on {transport}"
+            ),
+            Self::NotKatapult {
+                bootloader,
+                transport,
+            } => write!(
+                f,
+                "{transport} entered {bootloader}, but this firmware is flashed only through \
+                 Katapult; run `aldis reboot` to leave the bootloader"
+            ),
         }
     }
 }
@@ -280,6 +306,8 @@ impl std::error::Error for SystemFlashError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::MissingTransport
+            | Self::KatapultUsbOnly { .. }
+            | Self::NotKatapult { .. }
             | Self::UnrecognizedFirmwareTarget
             | Self::Stm32TargetMismatch { .. }
             | Self::Stm32AmbiguousApplication { .. } => None,
@@ -595,24 +623,7 @@ fn dispatch_serial_route(
 ) -> Result<FlashResult, SystemFlashError> {
     match route {
         SerialFlashRoute::Katapult { serial_device } => {
-            progress(SystemFlashProgress::Flashing);
-            let io = open_serial_when_ready(
-                "katapult",
-                options.katapult.bootloader_timeout,
-                options.katapult.poll_interval,
-                || {
-                    SystemSerialIo::open(
-                        &serial_device,
-                        options.katapult.baud_rate,
-                        options.katapult.read_timeout,
-                    )
-                },
-            )
-            .map_err(SystemFlashError::KatapultOpen)?;
-            let mut backend = KatapultAdapter::new(KatapultSerialTransport::new(io));
-            backend
-                .flash(firmware)
-                .map_err(SystemFlashError::KatapultFlash)
+            flash_katapult_serial(&serial_device, firmware, options, None, progress)
         }
         SerialFlashRoute::Stm32Dfu { sysfs_path, target } => {
             wait_for_usb_device_access(&sysfs_path)?;
@@ -645,6 +656,111 @@ fn dispatch_serial_route(
                 .map_err(SystemFlashError::PicoBoot)
         }
     }
+}
+
+/// Flashes `firmware` through Katapult's USB serial device, refusing a Katapult that starts its
+/// application anywhere but `application_start` when one is given.
+fn flash_katapult_serial(
+    serial_device: &Path,
+    firmware: &[u8],
+    options: SystemFlashOptions,
+    application_start: Option<u32>,
+    progress: &mut impl FnMut(SystemFlashProgress),
+) -> Result<FlashResult, SystemFlashError> {
+    progress(SystemFlashProgress::Flashing);
+    let io = open_serial_when_ready(
+        "katapult",
+        options.katapult.bootloader_timeout,
+        options.katapult.poll_interval,
+        || {
+            SystemSerialIo::open(
+                serial_device,
+                options.katapult.baud_rate,
+                options.katapult.read_timeout,
+            )
+        },
+    )
+    .map_err(SystemFlashError::KatapultOpen)?;
+    let backend = KatapultAdapter::new(KatapultSerialTransport::new(io));
+    let mut backend = match application_start {
+        Some(start) => backend.expecting_application_start(start),
+        None => backend,
+    };
+    backend
+        .flash(firmware)
+        .map_err(SystemFlashError::KatapultFlash)
+}
+
+/// Katapult's serial device from one observed bootloader; any other bootloader is refused.
+pub fn katapult_route(
+    observed: ObservedUsbBootloader,
+    context: &UnsupportedBootloaderContext,
+) -> Result<PathBuf, SystemFlashError> {
+    let selection = |error| SystemFlashError::Selection {
+        error,
+        transport: context.transport.clone(),
+    };
+    let bootloader = match select_usb_bootloader(observed).map_err(selection)? {
+        SelectedUsbBootloader::Katapult { serial_device, .. } => return Ok(serial_device),
+        SelectedUsbBootloader::Stm32Dfu { .. } => "STM32 DFU",
+        SelectedUsbBootloader::PicoBoot { .. } => "PicoBoot",
+        SelectedUsbBootloader::SamBa { .. } => "SAM-BA",
+    };
+    Err(SystemFlashError::NotKatapult {
+        bootloader,
+        transport: context.transport.clone(),
+    })
+}
+
+/// Flashes prebuilt firmware, linked to start at `application_start`, to an MCU on a USB serial
+/// device. Unlike a build, a prebuilt image carries no Kconfig to choose a bootloader route or
+/// an address by, so it is sent only to Katapult, and only when Katapult starts applications
+/// where the image is linked to run.
+pub fn flash_prebuilt_katapult_with_progress(
+    prepared: &PreparedBuild,
+    firmware: &[u8],
+    application_start: u32,
+    options: SystemFlashOptions,
+    mut progress: impl FnMut(SystemFlashProgress),
+) -> Result<FlashResult, SystemFlashError> {
+    let device = match prepared
+        .transport
+        .as_ref()
+        .ok_or(SystemFlashError::MissingTransport)?
+    {
+        McuTransport::Serial { device } if !is_tty_without_usb_device(Path::new(device)) => device,
+        McuTransport::Serial { device } => {
+            return Err(SystemFlashError::KatapultUsbOnly {
+                transport: format!("the UART {device}"),
+            });
+        }
+        McuTransport::Can { interface, uuid } => {
+            return Err(SystemFlashError::KatapultUsbOnly {
+                transport: format!("CAN ({interface}, {uuid:012x})"),
+            });
+        }
+    };
+    progress(SystemFlashProgress::EnteringBootloader);
+    let started = Instant::now();
+    let observed = SystemSerialIo::request_and_observe_any_usb_bootloader(
+        Path::new(device),
+        options.katapult.bootloader_timeout,
+        options.katapult.poll_interval,
+    )
+    .map_err(SystemFlashError::Bootloader)?;
+    let context = UnsupportedBootloaderContext {
+        transport: device.to_owned(),
+        reset_elapsed: Some(started.elapsed()),
+    };
+    progress(SystemFlashProgress::BootloaderReady);
+    let serial_device = katapult_route(observed, &context)?;
+    flash_katapult_serial(
+        &serial_device,
+        firmware,
+        options,
+        Some(application_start),
+        &mut progress,
+    )
 }
 
 /// The offset the device currently runs its application from, as far as the probe can tell.

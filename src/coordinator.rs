@@ -6,7 +6,8 @@ use crate::build::{BuildArtifact, BuildError, BuildProgress, CommandPort, Klippe
 use crate::flash::FlashResult;
 use crate::flash::system::{
     SystemFlashError, SystemFlashOptions, SystemFlashProgress,
-    flash_prepared_firmware_file_with_progress, flash_prepared_system_with_progress,
+    flash_prebuilt_katapult_with_progress, flash_prepared_firmware_file_with_progress,
+    flash_prepared_system_with_progress,
 };
 use crate::moonraker::McuInventory;
 use crate::prepare::{PreparationError, PreparedBuild, prepare_build};
@@ -80,10 +81,14 @@ pub enum FlashCoordinatorError {
 
 impl FlashCoordinatorError {
     /// Whether Klipper can safely be restarted after this failure. A USB MCU may
-    /// be left in its bootloader, but the host MCU never is.
+    /// be left in its bootloader, but the host MCU never is, and an MCU on a transport prebuilt
+    /// firmware is not sent over was never asked to enter one.
     pub fn allows_klipper_restore(&self) -> bool {
         match self {
-            Self::Flash(error) => matches!(error, SystemFlashError::LinuxHost(_)),
+            Self::Flash(error) => matches!(
+                error,
+                SystemFlashError::LinuxHost(_) | SystemFlashError::KatapultUsbOnly { .. }
+            ),
             Self::Coordinator(_) | Self::Artifact(_) => true,
         }
     }
@@ -285,6 +290,29 @@ where
         .map_err(FlashCoordinatorError::Flash)
     }
 
+    /// Stops Klipper if necessary, then sends prebuilt firmware, linked to start at
+    /// `application_start`, to the approved MCU's Katapult (see
+    /// [`flash_prebuilt_katapult_with_progress`]). Like every flash, this never restarts Klipper.
+    pub fn flash_prebuilt_with_progress(
+        &self,
+        approved: ApprovedBuild,
+        firmware: &[u8],
+        application_start: u32,
+        options: SystemFlashOptions,
+        mut progress: impl FnMut(UpdateProgress),
+    ) -> Result<FlashResult, FlashCoordinatorError> {
+        self.ensure_klipper_stopped(&mut progress)
+            .map_err(FlashCoordinatorError::Coordinator)?;
+        flash_prebuilt_katapult_with_progress(
+            &approved.pending.prepared,
+            firmware,
+            application_start,
+            options,
+            |stage| progress(update_progress(stage)),
+        )
+        .map_err(FlashCoordinatorError::Flash)
+    }
+
     /// Builds an approved target, then invokes `flash` only after Klipper is stopped.
     pub fn execute_and_flash(
         &self,
@@ -401,6 +429,20 @@ mod tests {
         );
         assert!(
             FlashCoordinatorError::Artifact(std::io::Error::other("gone")).allows_klipper_restore()
+        );
+        assert!(
+            FlashCoordinatorError::Flash(SystemFlashError::KatapultUsbOnly {
+                transport: "CAN (can0, e7819ed8e7d3)".to_owned(),
+            })
+            .allows_klipper_restore(),
+            "an MCU prebuilt firmware is not sent to was never touched"
+        );
+        assert!(
+            !FlashCoordinatorError::Flash(SystemFlashError::NotKatapult {
+                bootloader: "STM32 DFU",
+                transport: "/dev/ttyACM0".to_owned(),
+            })
+            .allows_klipper_restore()
         );
     }
 
