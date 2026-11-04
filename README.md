@@ -110,7 +110,9 @@ These bootloaders are entered and flashed unattended, directly from the running 
 - **SAM-BA** on SAMD21 (the Seeed XIAO SAMD21's UF2 bootloader, `2886:002f`)
 
 FOCI firmware is flashed through Katapult only; see [FOCI](#foci). Beacon firmware is flashed
-through Beacon's own DFU bootloader only; see [Beacon](#beacon).
+through Beacon's own DFU bootloader only; see [Beacon](#beacon). Cartographer firmware is
+flashed through Katapult only, and only when the probe is named; see
+[Cartographer](#cartographer).
 
 Every other bootloader identity is reported as unsupported rather than guessed at. MCUs whose
 firmware configuration names a family none of these bootloaders run on (Katapult builds only for
@@ -166,6 +168,20 @@ flashes only after it has. Requirements:
 `flash` accepts only a Beacon `.dfu` image for a Beacon, including one whose version `aldis` cannot compare (such as a beta), and sends it through the same route. The agent compares Beacons with their images and offers to update outdated ones.
 
 A Beacon left in its bootloader (for example by an interrupted flash) can only leave it by being flashed. `aldis reboot` finds it on USB and, after asking, flashes the image for the revision its bootloader names, from the same checkout (`--beacon-source` names another). It flashes nothing when the checkout's image is not for that bootloader. Restart Klipper afterwards (`FIRMWARE_RESTART`) so it reconnects the Beacon.
+
+## Cartographer
+
+[Cartographer](https://github.com/Cartographer3D/cartographer_firmware) probes are not built from the Klipper checkout either. Their firmware is published as prebuilt images in the `cartographer_firmware` repository, one per probe generation, link (USB, or CAN at one bitrate) and build (full or lite), listed in its `firmware_list.csv`. `aldis` flashes a Cartographer with an image from your own clone of it:
+
+- The clone is `~/cartographer_firmware`; name another with `--cartographer-source` (or `ALDIS_CARTOGRAPHER_SOURCE`). `status` shows it as `Cartographer firmware`, with the installed `cartographer3d-plugin` version, read from the virtualenv Klippy runs under (or `~/klippy-env`).
+- A Cartographer is recognized by its `app` (`Cartographer`, from 6.1.0) or, before that, by a version starting with `Cartographer`. Its generation comes from its `MCU` (`stm32f042x6` is V2/V3, `stm32g431xx` V4), its build from its version (`lite`, or `K1` for the 5.x V3 builds, is the lite build), and its link and bitrate from its `CANBUS_FREQUENCY`. A version without a number (`CARTOGRAPHER V3`) cannot be compared and is reported as unsupported.
+- Only images the manifest lists as updates onto an existing Katapult are considered, never one that includes or replaces the bootloader. A wrong image leaves a Cartographer recoverable only with its boot pins bridged by hand, so the manifest only nominates candidates: each image's own embedded identify dictionary must name exactly the probe's `MCU`, CAN bitrate and build, and the version the manifest gives, and the image must be linked to start at `0x08002000`, after Cartographer's 8 KiB Katapult. Exactly one image may match.
+- The image is the newest the installed plugin works with (`min_plugin_version`); `status` names a newer one the plugin is too old for. Update the plugin yourself first; `aldis` never installs it. A probe newer than its image is not downgraded unless `--force` is given.
+- Cartographer's plugin removes every scan and touch model made with other firmware, so every update means recalibrating. A Cartographer is therefore updated only when named (`aldis update cartographer`), never by `update` on its own, `--all` or `--auto`, which say how to update one that is behind. The confirmation prompt and the end of the run say it must be recalibrated.
+- The image is read right before flashing, checked once more against the probe, and refused if the clone now holds another image than the one approved. It is sent only to Katapult, over USB or CAN, and only to a Katapult that starts applications at `0x08002000`; a Cartographer on a UART is refused before it is touched. A copy is kept in the run workspace.
+- The images are Cartographer's; their repository carries no license file, so `aldis` only ever reads them from your own clone and never downloads them.
+
+`flash` accepts for a Cartographer only an image whose identify dictionary names its own `MCU`, link and CAN bitrate and that starts at `0x08002000`; a file for the other build (full or lite) is allowed. The agent reports Cartographers as current or behind their image but offers no update action; update them with `aldis update` and their name.
 
 ## License
 
