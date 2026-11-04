@@ -573,6 +573,7 @@ mod tests {
             peers: Vec::new(),
             foci_release: None,
             beacon: crate::beacon::Targets::default(),
+            cartographer: crate::cartographer::Targets::default(),
         }
     }
 
@@ -860,6 +861,36 @@ mod tests {
             *service.backend.seen_targets.lock().unwrap(),
             vec!["mcu beacon"]
         );
+    }
+
+    #[test]
+    fn never_updates_a_cartographer() {
+        let mut snapshot = snapshot(PrintState::Standby);
+        let mut probe = mcu("mcu cartographer", "CARTOGRAPHER V4 6.0.0", "");
+        probe.app = Some("Cartographer".to_owned());
+        probe.mcu = "stm32g431xx".to_owned();
+        snapshot.inventory.as_mut().unwrap().mcus.push(probe);
+        snapshot.cartographer.mcus.insert(
+            "mcu cartographer".to_owned(),
+            Ok(crate::cartographer::Target {
+                path: std::path::PathBuf::from("/home/pi/cartographer_firmware/firmware/x.bin"),
+                version: semver::Version::new(6, 1, 0),
+                reported: "CARTOGRAPHER V4 6.1.0".to_owned(),
+                held_back: None,
+            }),
+        );
+        let service = AgentService::new(
+            FakeBackend::new(snapshot, Ok(RunOutcome::default())),
+            sink().0,
+        );
+
+        let error = service
+            .update(UpdateRequest::Mcus {
+                mcus: vec!["cartographer".to_owned()],
+            })
+            .unwrap_err();
+        assert_eq!(reason(&error), "not_updatable");
+        assert!(service.backend.seen_targets.lock().unwrap().is_empty());
     }
 
     #[test]

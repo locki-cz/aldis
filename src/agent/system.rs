@@ -138,6 +138,7 @@ impl AgentBackend for SystemBackend {
             peers: Vec::new(),
             foci_release: None,
             beacon: crate::beacon::Targets::default(),
+            cartographer: crate::cartographer::Targets::default(),
         };
         if snapshot.host.info.state == KlippyState::Disconnected {
             return snapshot;
@@ -157,6 +158,11 @@ impl AgentBackend for SystemBackend {
                     &inventory,
                     None,
                     snapshot.host.info.klipper_path.as_deref(),
+                );
+                snapshot.cartographer = crate::cartographer::targets_for(
+                    &inventory,
+                    None,
+                    snapshot.host.info.python_path.as_deref(),
                 );
                 snapshot.inventory = Some(inventory);
             }
