@@ -608,6 +608,7 @@ mod tests {
                 state_message: String::new(),
                 software_version: None,
                 klipper_path: None,
+                python_path: None,
             })
         }
 
@@ -957,6 +958,7 @@ mod tests {
                 state_message: String::new(),
                 software_version: None,
                 klipper_path: None,
+                python_path: None,
             })
         }
 
@@ -1074,6 +1076,7 @@ mod tests {
                 state_message: String::new(),
                 software_version: None,
                 klipper_path: None,
+                python_path: None,
             })
         }
 
