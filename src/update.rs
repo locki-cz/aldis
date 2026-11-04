@@ -138,7 +138,12 @@ fn run_update(
     let versions = TargetVersions::klipper(
         checkout_revision(&source).unwrap_or(CheckoutRevision::Indeterminate),
     )
-    .with_foci_release(crate::discovery::foci_release(&inventory, &releases));
+    .with_foci_release(crate::discovery::foci_release(&inventory, &releases))
+    .with_beacon_targets(aldis::beacon::targets_for(
+        &inventory,
+        arguments.connection.beacon_source.as_deref(),
+        Some(&source),
+    ));
     ui.block(&format_status(
         &source,
         &versions,

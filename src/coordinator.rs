@@ -144,6 +144,10 @@ pub enum UpdateProgress {
     DownloadingFirmware,
     /// The prebuilt firmware image was downloaded and verified.
     FirmwareDownloaded,
+    /// A firmware image is being read from a local checkout.
+    ReadingFirmware,
+    /// The local firmware image was read and verified.
+    FirmwareRead,
     /// Klipper is expanding the selected MCU configuration.
     ConfiguringFirmware,
     /// Klipper is compiling the selected firmware artifact.
