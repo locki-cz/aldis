@@ -77,6 +77,10 @@ pub(crate) struct ConnectionArgs {
     /// klippy/extras/beacon.py is linked from, then ~/beacon_klipper.
     #[arg(long, env = "ALDIS_BEACON_SOURCE")]
     pub(crate) beacon_source: Option<PathBuf>,
+    /// cartographer_firmware clone to flash Cartographer firmware from. Defaults to
+    /// ~/cartographer_firmware.
+    #[arg(long, env = "ALDIS_CARTOGRAPHER_SOURCE")]
+    pub(crate) cartographer_source: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

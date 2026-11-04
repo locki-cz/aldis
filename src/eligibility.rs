@@ -1,6 +1,7 @@
 //! Read-only MCU update eligibility and revision comparison.
 
 use crate::beacon;
+use crate::cartographer;
 use crate::foci;
 use crate::moonraker::Mcu;
 
@@ -15,6 +16,10 @@ pub enum Eligibility {
     /// A Beacon this updater can flash with the image for its revision from the user's
     /// `beacon_klipper` checkout.
     Beacon(beacon::Firmware),
+    /// A Cartographer probe this updater can flash with an image from the user's
+    /// `cartographer_firmware` clone, but only when it is named: every update means
+    /// recalibrating the probe.
+    Cartographer(cartographer::Firmware),
     /// Firmware managed by another project, named as Moonraker reported it (e.g. "Beacon").
     ExternallyManaged(String),
     /// Legacy or unidentified Klipper-family firmware without required updater metadata.
@@ -56,6 +61,9 @@ pub enum UnsupportedReason {
     /// FOCI firmware whose build no FOCI release asset matches.
     #[error(transparent)]
     Foci(foci::Unsupported),
+    /// Cartographer firmware no update image can be matched to.
+    #[error(transparent)]
+    Cartographer(cartographer::Unsupported),
 }
 
 /// Minimum Klipper version required to reliably report `mcu_kconfig`; see README.md.
@@ -102,6 +110,8 @@ pub struct TargetVersions {
     pub foci: Option<foci::Release>,
     /// The image each Beacon is updated to, or why none is known.
     pub beacon: beacon::Targets,
+    /// The image each Cartographer is updated to, or why none is known.
+    pub cartographer: cartographer::Targets,
 }
 
 impl TargetVersions {
@@ -111,6 +121,7 @@ impl TargetVersions {
             klipper: checkout,
             foci: None,
             beacon: beacon::Targets::default(),
+            cartographer: cartographer::Targets::default(),
         }
     }
 
@@ -126,6 +137,14 @@ impl TargetVersions {
     pub fn with_beacon_targets(self, targets: beacon::Targets) -> Self {
         Self {
             beacon: targets,
+            ..self
+        }
+    }
+
+    /// These targets with each Cartographer updated to its image in `targets`.
+    pub fn with_cartographer_targets(self, targets: cartographer::Targets) -> Self {
+        Self {
+            cartographer: targets,
             ..self
         }
     }
@@ -150,11 +169,22 @@ impl TargetVersions {
                 .target(&mcu.name)
                 .map_or_else(|| "unknown".to_owned(), |target| target.version.reported());
         }
+        if cartographer::is_cartographer(mcu) {
+            return self
+                .cartographer
+                .target(&mcu.name)
+                .map_or_else(|| "unknown".to_owned(), |target| target.reported.clone());
+        }
         self.klipper.label().to_owned()
     }
 
     /// Whether `mcu` runs its target: `None` when there is no known target to check against.
     pub fn reached_by(&self, mcu: &Mcu) -> Option<bool> {
+        if cartographer::is_cartographer(mcu) {
+            // The plugin keeps calibrations by the exact version string, so confirm that.
+            let target = self.cartographer.target(&mcu.name)?;
+            return Some(mcu.version.as_deref() == Some(target.reported.as_str()));
+        }
         if beacon::is_beacon(mcu) {
             let target = self.beacon.target(&mcu.name)?;
             return Some(
@@ -197,6 +227,12 @@ pub enum UpdateSelection {
     All,
 }
 
+/// Whether `mcu` is updated only when named: updating a Cartographer removes its calibrations,
+/// so it is never part of an update of every MCU.
+pub fn requires_naming(mcu: &Mcu) -> bool {
+    cartographer::is_cartographer(mcu)
+}
+
 /// Returns whether one MCU is eligible for the requested update selection.
 pub fn is_selected(mcu: &Mcu, versions: &TargetVersions, selection: &UpdateSelection) -> bool {
     let status = assess_mcu(mcu, versions);
@@ -206,6 +242,7 @@ pub fn is_selected(mcu: &Mcu, versions: &TargetVersions, selection: &UpdateSelec
         Eligibility::Foci(_) => versions.foci.is_some(),
         // A Beacon is flashed with its image from the checkout, which must have been found.
         Eligibility::Beacon(_) => versions.beacon.target(&mcu.name).is_some(),
+        Eligibility::Cartographer(_) => versions.cartographer.target(&mcu.name).is_some(),
         _ => false,
     };
     if !updatable {
@@ -244,6 +281,14 @@ pub fn assess_mcu(mcu: &Mcu, versions: &TargetVersions) -> McuStatus {
                 .target(&mcu.name)
                 .map_or(RevisionStatus::Indeterminate, |target| {
                     beacon::compare(&firmware.version, &target.version)
+                }),
+        ),
+        Eligibility::Cartographer(firmware) => Some(
+            versions
+                .cartographer
+                .target(&mcu.name)
+                .map_or(RevisionStatus::Indeterminate, |target| {
+                    cartographer::compare(firmware, target)
                 }),
         ),
         _ => None,
@@ -307,6 +352,13 @@ fn is_klipper_build_timestamp(candidate: &str) -> bool {
 pub fn classify_mcu(mcu: &Mcu) -> Eligibility {
     if let Some(firmware) = beacon::identify(mcu) {
         return Eligibility::Beacon(firmware);
+    }
+    match cartographer::identify(mcu) {
+        Some(Ok(firmware)) => return Eligibility::Cartographer(firmware),
+        Some(Err(reason)) => {
+            return Eligibility::Unsupported(UnsupportedReason::Cartographer(reason));
+        }
+        None => {}
     }
     // Real Klipper and Kalico always populate `app`; third-party firmware such as Beacon
     // reports it as an empty string instead of omitting it, so treat blank the same as absent.

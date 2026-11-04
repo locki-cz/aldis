@@ -62,6 +62,24 @@ pub(crate) fn foci_release(
         .flatten()
 }
 
+/// The image each Cartographer in `inventory` is updated to, from the clone at `configured` or
+/// `~/cartographer_firmware`, for the plugin installed in the virtualenv Klippy runs under.
+pub(crate) fn cartographer_targets(
+    inventory: &McuInventory,
+    moonraker: &impl aldis::moonraker::HostPort,
+    configured: Option<&std::path::Path>,
+) -> aldis::cartographer::Targets {
+    if !inventory
+        .mcus
+        .iter()
+        .any(aldis::cartographer::is_cartographer)
+    {
+        return aldis::cartographer::Targets::default();
+    }
+    let python_path = moonraker.host_info().ok().and_then(|info| info.python_path);
+    aldis::cartographer::targets_for(inventory, configured, python_path.as_deref())
+}
+
 const TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 

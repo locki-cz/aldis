@@ -358,6 +358,14 @@ pub fn assess(snapshot: &Snapshot) -> StatusBody {
                 (Eligibility::Unsupported(UnsupportedReason::Foci(reason)), _) => {
                     (McuState::ExternallyManaged, reason.to_string())
                 }
+                (Eligibility::Unsupported(UnsupportedReason::Cartographer(reason)), _) => {
+                    (McuState::ExternallyManaged, reason.to_string())
+                }
+                // The agent does not look for Cartographer images yet.
+                (Eligibility::Cartographer(_), _) => (
+                    McuState::ExternallyManaged,
+                    "managed by Cartographer".to_owned(),
+                ),
                 (Eligibility::Unsupported(reason), _) => {
                     (McuState::UnsupportedLegacy, reason.to_string())
                 }
