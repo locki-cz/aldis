@@ -10,7 +10,7 @@ use aldis::build::SystemCommandAdapter;
 use aldis::checkout::{refresh as refresh_checkout, revision as checkout_revision};
 use aldis::config::{FleetConfig, instance_urls};
 use aldis::coordinator::{BuildCoordinator, UpdateProgress};
-use aldis::eligibility::{CheckoutRevision, UpdateSelection, is_selected};
+use aldis::eligibility::{CheckoutRevision, TargetVersions, UpdateSelection, is_selected};
 use aldis::fleet::peer::{check_bridge, peers_excluding};
 use aldis::fleet::system::{other_urls, probe_peer};
 use aldis::logging::{self, LoggingCommandAdapter};
@@ -134,10 +134,12 @@ fn run_update(
             unknown.join(", ")
         );
     }
-    let checkout = checkout_revision(&source).unwrap_or(CheckoutRevision::Indeterminate);
+    let versions = TargetVersions::klipper(
+        checkout_revision(&source).unwrap_or(CheckoutRevision::Indeterminate),
+    );
     ui.block(&format_status(
         &source,
-        &checkout,
+        &versions,
         &inventory,
         refreshed.as_ref(),
     ));
@@ -147,7 +149,7 @@ fn run_update(
         .mcus
         .iter()
         .filter(|mcu| arguments.targets.is_empty() || arguments.targets.contains(&mcu.name))
-        .filter(|mcu| is_selected(mcu, &checkout, &selection))
+        .filter(|mcu| is_selected(mcu, &versions, &selection))
         .map(|mcu| mcu.name.clone())
         .collect::<Vec<_>>();
     let offered = aldis::flash_order::flash_order(&inventory, &offered);
@@ -180,7 +182,7 @@ fn run_update(
         workspace,
         RunRequest {
             targets: &offered,
-            target_revision: &checkout,
+            target_versions: &versions,
             clean: arguments.clean,
         },
         &mut hooks,

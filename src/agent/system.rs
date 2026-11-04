@@ -8,7 +8,7 @@ use crate::agent::service::AgentBackend;
 use crate::build::SystemCommandAdapter;
 use crate::checkout;
 use crate::coordinator::BuildCoordinator;
-use crate::eligibility::CheckoutRevision;
+use crate::eligibility::{CheckoutRevision, TargetVersions};
 use crate::flash_order::is_usb_can_bridge;
 use crate::fleet::peer::{PeerState, peers_excluding};
 use crate::fleet::system::probe_peer;
@@ -241,7 +241,7 @@ impl SystemBackend {
             &workspace,
             RunRequest {
                 targets,
-                target_revision: &CheckoutRevision::Known(version.clone()),
+                target_versions: &TargetVersions::klipper(CheckoutRevision::Known(version.clone())),
                 clean: false,
             },
             hooks,

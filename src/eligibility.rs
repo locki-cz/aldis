@@ -82,6 +82,42 @@ impl CheckoutRevision {
     }
 }
 
+/// What each MCU is compared against and updated to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetVersions {
+    /// The Klipper checkout revision Klipper-family MCUs are built from.
+    pub klipper: CheckoutRevision,
+}
+
+impl TargetVersions {
+    /// Targets for Klipper-family MCUs built from `checkout`.
+    pub fn klipper(checkout: CheckoutRevision) -> Self {
+        Self { klipper: checkout }
+    }
+
+    /// Targets nothing is compared against, for a run that only verifies reconnection.
+    pub fn indeterminate() -> Self {
+        Self::klipper(CheckoutRevision::Indeterminate)
+    }
+
+    /// The target `mcu` is updated to, for display; `unknown` when indeterminate.
+    pub fn label_for(&self, _mcu: &Mcu) -> &str {
+        self.klipper.label()
+    }
+
+    /// Whether `mcu` runs its target: `None` when there is no known target to check against.
+    pub fn reached_by(&self, mcu: &Mcu) -> Option<bool> {
+        match &self.klipper {
+            CheckoutRevision::Known(revision) => Some(
+                mcu.version
+                    .as_deref()
+                    .is_some_and(|version| revisions_match(version, revision)),
+            ),
+            CheckoutRevision::Indeterminate => None,
+        }
+    }
+}
+
 /// Read-only eligibility and revision result for one MCU.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McuStatus {
@@ -102,8 +138,8 @@ pub enum UpdateSelection {
 }
 
 /// Returns whether one MCU is eligible for the requested update selection.
-pub fn is_selected(mcu: &Mcu, checkout: &CheckoutRevision, selection: &UpdateSelection) -> bool {
-    let status = assess_mcu(mcu, checkout);
+pub fn is_selected(mcu: &Mcu, versions: &TargetVersions, selection: &UpdateSelection) -> bool {
+    let status = assess_mcu(mcu, versions);
     if status.eligibility != Eligibility::Eligible {
         return false;
     }
@@ -114,17 +150,18 @@ pub fn is_selected(mcu: &Mcu, checkout: &CheckoutRevision, selection: &UpdateSel
 }
 
 /// Classifies one MCU and compares its revision when eligible.
-pub fn assess_mcu(mcu: &Mcu, checkout: &CheckoutRevision) -> McuStatus {
+pub fn assess_mcu(mcu: &Mcu, versions: &TargetVersions) -> McuStatus {
     let eligibility = classify_mcu(mcu);
-    let revision = (eligibility == Eligibility::Eligible).then(|| match (&mcu.version, checkout) {
-        (Some(running), CheckoutRevision::Known(selected))
-            if revisions_match(running, selected) =>
-        {
-            RevisionStatus::Current
-        }
-        (Some(_), CheckoutRevision::Known(_)) => RevisionStatus::UpdateRequired,
-        _ => RevisionStatus::Indeterminate,
-    });
+    let revision =
+        (eligibility == Eligibility::Eligible).then(|| match (&mcu.version, &versions.klipper) {
+            (Some(running), CheckoutRevision::Known(selected))
+                if revisions_match(running, selected) =>
+            {
+                RevisionStatus::Current
+            }
+            (Some(_), CheckoutRevision::Known(_)) => RevisionStatus::UpdateRequired,
+            _ => RevisionStatus::Indeterminate,
+        });
     McuStatus {
         eligibility,
         revision,

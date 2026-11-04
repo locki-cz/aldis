@@ -3,7 +3,7 @@
 use serde::Serialize;
 
 use crate::eligibility::{
-    CheckoutRevision, Eligibility, RevisionStatus, assess_mcu, revisions_match,
+    CheckoutRevision, Eligibility, RevisionStatus, TargetVersions, assess_mcu, revisions_match,
 };
 use crate::flash_order::is_usb_can_bridge;
 use crate::fleet::peer::{PeerState, check_bridge};
@@ -278,9 +278,11 @@ pub fn assess(snapshot: &Snapshot) -> StatusBody {
     let host = &snapshot.host;
     let blocker = blocker(host);
     let software = host.info.software_version.clone();
-    let target = software
-        .clone()
-        .map_or(CheckoutRevision::Indeterminate, CheckoutRevision::Known);
+    let target = TargetVersions::klipper(
+        software
+            .clone()
+            .map_or(CheckoutRevision::Indeterminate, CheckoutRevision::Known),
+    );
     let software_label = software.as_deref().unwrap_or("unknown");
     let mut mcus = Vec::new();
     if let Some(inventory) = &snapshot.inventory {

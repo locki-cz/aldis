@@ -5,7 +5,7 @@ use anyhow::Context;
 
 use aldis::build::SystemCommandAdapter;
 use aldis::coordinator::BuildCoordinator;
-use aldis::eligibility::{CheckoutRevision, Eligibility, classify_mcu};
+use aldis::eligibility::{Eligibility, TargetVersions, classify_mcu};
 use aldis::logging::LoggingCommandAdapter;
 use aldis::moonraker::{McuInventory, MoonrakerAdapter};
 use aldis::update_run::{Operation, failure_detail, failure_message};
@@ -152,7 +152,7 @@ fn run_flash(mut arguments: FlashArgs, ui: &mut UpdateUi) -> anyhow::Result<()> 
     if let Err(message) = aldis::update_run::wait_for_mcus(
         &moonraker,
         std::slice::from_ref(&arguments.target),
-        &CheckoutRevision::Indeterminate,
+        &TargetVersions::indeterminate(),
     ) {
         ui.finish_failure();
         let message = format!(

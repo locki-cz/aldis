@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::build::CommandPort;
 use crate::coordinator::{BuildCoordinator, FlashCoordinatorError, UpdateProgress};
-use crate::eligibility::{CheckoutRevision, revisions_match};
+use crate::eligibility::TargetVersions;
 use crate::flash::linux_host::HOST_MCU_UNIT_FILE;
 use crate::flash::system::{SystemFlashOptions, SystemKatapultOptions};
 use crate::moonraker::{HostPort, McuInventory, McuTransport, MoonrakerPort, PrinterStatePort};
@@ -65,17 +65,17 @@ fn wait_for_application_in(
     .map_err(|()| format!("{} did not come back at {description}", mcu.name))
 }
 
-/// Waits for Klipper to report every MCU in `selected` again, at `checkout`'s revision when it is
-/// known; with an indeterminate revision only reconnection is verified.
+/// Waits for Klipper to report every MCU in `selected` again, at its target version when that is
+/// known; without one only reconnection is verified.
 pub fn wait_for_mcus(
     client: &(impl MoonrakerPort + HostPort),
     selected: &[String],
-    checkout: &CheckoutRevision,
+    versions: &TargetVersions,
 ) -> Result<(), String> {
     wait_for_mcus_with(
         client,
         selected,
-        checkout,
+        versions,
         &crate::identify::SerialIdentify::default(),
     )
 }
@@ -90,13 +90,13 @@ pub fn wait_for_mcus(
 fn wait_for_mcus_with(
     client: &(impl MoonrakerPort + HostPort),
     selected: &[String],
-    checkout: &CheckoutRevision,
+    versions: &TargetVersions,
     prober: &impl crate::identify::IdentifyPort,
 ) -> Result<(), String> {
     wait_for_mcus_with_params(
         client,
         selected,
-        checkout,
+        versions,
         prober,
         Duration::from_secs(30),
         Duration::from_millis(250),
@@ -106,7 +106,7 @@ fn wait_for_mcus_with(
 fn wait_for_mcus_with_params(
     client: &(impl MoonrakerPort + HostPort),
     selected: &[String],
-    checkout: &CheckoutRevision,
+    versions: &TargetVersions,
     prober: &impl crate::identify::IdentifyPort,
     timeout: Duration,
     poll_interval: Duration,
@@ -115,7 +115,7 @@ fn wait_for_mcus_with_params(
         let attempt_result = match client.discover_mcus() {
             Ok(mut inventory) => {
                 probe_unreported(client, &mut inventory, prober);
-                match pending_mcus(&inventory, selected, checkout) {
+                match pending_mcus(&inventory, selected, versions) {
                     pending if pending.is_empty() => Ok(()),
                     pending => Err(format!("still waiting on: {}", pending.join(", "))),
                 }
@@ -152,32 +152,23 @@ fn probe_unreported(
     }
 }
 
-/// Selected MCU names not yet reporting `checkout`'s revision, each annotated with its
+/// Selected MCU names not yet reporting their target version, each annotated with its
 /// current state so a timeout explains what was actually observed.
 fn pending_mcus(
     inventory: &McuInventory,
     selected: &[String],
-    checkout: &CheckoutRevision,
+    versions: &TargetVersions,
 ) -> Vec<String> {
     selected
         .iter()
         .filter_map(
             |name| match inventory.mcus.iter().find(|mcu| &mcu.name == name) {
                 None => Some(format!("{name} (not reported by Moonraker)")),
-                Some(mcu) => match checkout {
-                    CheckoutRevision::Known(revision)
-                        if !mcu
-                            .version
-                            .as_deref()
-                            .is_some_and(|version| revisions_match(version, revision)) =>
-                    {
-                        Some(format!(
-                            "{name} (reports {})",
-                            mcu.version.as_deref().unwrap_or("unknown")
-                        ))
-                    }
-                    _ => None,
-                },
+                Some(mcu) if versions.reached_by(mcu) == Some(false) => Some(format!(
+                    "{name} (reports {})",
+                    mcu.version.as_deref().unwrap_or("unknown")
+                )),
+                Some(_) => None,
             },
         )
         .collect()
@@ -271,10 +262,10 @@ pub trait RunHooks {
     fn failed(&mut self, message: &str);
 }
 
-/// What to update: `targets` in flashing order, all against `target_revision`.
+/// What to update: `targets` in flashing order, each to its version in `target_versions`.
 pub struct RunRequest<'a> {
     pub targets: &'a [String],
-    pub target_revision: &'a CheckoutRevision,
+    pub target_versions: &'a TargetVersions,
     pub clean: bool,
 }
 
@@ -352,7 +343,7 @@ fn post_flash_failure(
 }
 
 /// Builds and flashes each approved target in order, then starts Klipper and waits for every
-/// updated MCU to reconnect at `target_revision`. The first failure ends the run.
+/// updated MCU to reconnect at its target version. The first failure ends the run.
 pub fn run_updates<B: CommandPort, S: CommandPort>(
     coordinator: &BuildCoordinator<B, S>,
     moonraker: &(impl MoonrakerPort + PrinterStatePort + HostPort),
@@ -373,7 +364,7 @@ pub fn run_updates<B: CommandPort, S: CommandPort>(
             ));
         };
         let current = mcu.version.as_deref().unwrap_or("unknown");
-        if !hooks.approve(name, current, request.target_revision.label()) {
+        if !hooks.approve(name, current, request.target_versions.label_for(mcu)) {
             continue;
         }
         let pending = match coordinator.prepare(inventory, workspace, name, request.clean) {
@@ -442,7 +433,7 @@ pub fn run_updates<B: CommandPort, S: CommandPort>(
     }
     hooks.step_succeeded(RunStep::StartKlipper);
     hooks.step_started(RunStep::Reconnect);
-    if let Err(message) = wait_for_mcus(moonraker, &updated, request.target_revision) {
+    if let Err(message) = wait_for_mcus(moonraker, &updated, request.target_versions) {
         tracing::debug!(error = %message, "waiting for updated MCUs to reconnect failed");
         return Err(fail(hooks, message, None, &updated));
     }
@@ -460,7 +451,7 @@ mod tests {
     use super::*;
     use crate::build::{BuildCommand, BuildError, CommandError, CommandOutput};
     use crate::coordinator::{BuildCoordinator, CoordinatorError, FlashCoordinatorError};
-    use crate::eligibility::CheckoutRevision;
+    use crate::eligibility::{CheckoutRevision, TargetVersions};
     use crate::flash::system::SystemFlashError;
     use crate::moonraker::{
         HostInfo, KlippyState, Mcu, McuInventory, McuTransport, MoonrakerError, MoonrakerPort,
@@ -708,7 +699,7 @@ mod tests {
     #[test]
     fn requires_every_selected_mcu_at_the_built_revision() {
         let selected = vec!["mcu h723".to_owned(), "mcu rp2040".to_owned()];
-        let checkout = CheckoutRevision::Known("v2".to_owned());
+        let checkout = TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned()));
         let only_one = McuInventory {
             mcus: vec![mcu("mcu h723", "v2", None)],
             unreported: Vec::new(),
@@ -735,7 +726,7 @@ mod tests {
     #[test]
     fn wait_for_mcus_succeeds_once_the_injected_source_reports_readiness() {
         let selected = vec!["mcu h723".to_owned()];
-        let checkout = CheckoutRevision::Known("v2".to_owned());
+        let checkout = TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned()));
         let moonraker = FakeMoonraker::new(Ok(McuInventory {
             mcus: vec![mcu("mcu h723", "v2", None)],
             unreported: Vec::new(),
@@ -747,7 +738,7 @@ mod tests {
     #[test]
     fn wait_for_mcus_resolves_a_still_unreported_mcu_via_direct_identify() {
         let selected = vec!["mcu expander".to_owned()];
-        let checkout = CheckoutRevision::Known("v2".to_owned());
+        let checkout = TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned()));
         let moonraker = FakeMoonraker::in_state(
             Ok(McuInventory {
                 mcus: Vec::new(),
@@ -782,7 +773,7 @@ mod tests {
     #[test]
     fn wait_for_mcus_still_fails_when_direct_identify_cannot_resolve_the_mcu() {
         let selected = vec!["mcu expander".to_owned()];
-        let checkout = CheckoutRevision::Known("v2".to_owned());
+        let checkout = TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned()));
         let moonraker = FakeMoonraker::in_state(
             Ok(McuInventory {
                 mcus: Vec::new(),
@@ -1020,7 +1011,7 @@ mod tests {
             &workspace,
             RunRequest {
                 targets: &["mcu".to_owned()],
-                target_revision: &CheckoutRevision::Known("v2".to_owned()),
+                target_versions: &TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
                 clean: false,
             },
             &mut hooks,
@@ -1046,7 +1037,7 @@ mod tests {
             &workspace,
             RunRequest {
                 targets: &["mcu".to_owned()],
-                target_revision: &CheckoutRevision::Known("v2".to_owned()),
+                target_versions: &TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
                 clean: false,
             },
             &mut hooks,

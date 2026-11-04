@@ -3,7 +3,9 @@
 use std::process::ExitCode;
 
 use aldis::checkout::RefreshResult;
-use aldis::eligibility::{CheckoutRevision, Eligibility, RevisionStatus, assess_mcu};
+use aldis::eligibility::{
+    CheckoutRevision, Eligibility, RevisionStatus, TargetVersions, assess_mcu,
+};
 use aldis::moonraker::{McuInventory, McuTransport, MoonrakerAdapter, MoonrakerPort};
 use anyhow::Context;
 
@@ -17,10 +19,11 @@ pub(crate) fn status(arguments: ConnectionArgs) -> ExitCode {
     let moonraker = MoonrakerAdapter::new(&arguments.moonraker.moonraker);
     let revision = aldis::checkout::revision(&source).unwrap_or(CheckoutRevision::Indeterminate);
     tracing::debug!(?revision, "checkout revision resolved");
+    let versions = TargetVersions::klipper(revision);
     match status_report(
         &arguments.moonraker.moonraker,
         &moonraker,
-        revision,
+        versions,
         &source,
     ) {
         Ok(report) => {
@@ -34,30 +37,30 @@ pub(crate) fn status(arguments: ConnectionArgs) -> ExitCode {
 fn status_report(
     url: &str,
     moonraker: &(impl MoonrakerPort + aldis::moonraker::HostPort),
-    revision: CheckoutRevision,
+    versions: TargetVersions,
     source: &std::path::Path,
 ) -> anyhow::Result<String> {
     tracing::info!("discovering MCUs from Moonraker");
     let mut inventory =
         crate::discovery::discover_mcus_with_retry(moonraker).context("failed to discover MCUs")?;
     crate::discovery::probe_unreported(url, moonraker, &mut inventory);
-    Ok(format_status(source, &revision, &inventory, None))
+    Ok(format_status(source, &versions, &inventory, None))
 }
 
 pub(crate) fn format_status(
     source: &std::path::Path,
-    checkout: &CheckoutRevision,
+    versions: &TargetVersions,
     inventory: &McuInventory,
     refreshed: Option<&RefreshResult>,
 ) -> String {
-    let revision = refreshed.map_or_else(|| checkout.label().to_owned(), refresh_label);
+    let revision = refreshed.map_or_else(|| versions.klipper.label().to_owned(), refresh_label);
     let mut output = format!(
         "Klipper source:    {}\nCheckout revision: {}\n",
         source.display(),
         revision,
     );
     for mcu in &inventory.mcus {
-        let status = assess_mcu(mcu, checkout);
+        let status = assess_mcu(mcu, versions);
         output.push_str(&format!("\n{}\n", mcu.name));
         for (label, value) in [
             ("firmware:", firmware_label(mcu, &status.eligibility)),
@@ -147,7 +150,7 @@ pub(crate) fn refresh_label(refreshed: &RefreshResult) -> String {
 mod tests {
     use super::{format_status, status_report};
     use aldis::checkout::RefreshResult;
-    use aldis::eligibility::CheckoutRevision;
+    use aldis::eligibility::{CheckoutRevision, TargetVersions};
     use aldis::moonraker::{Mcu, McuInventory, McuTransport, MoonrakerError, MoonrakerPort};
 
     #[test]
@@ -164,7 +167,9 @@ mod tests {
         assert_eq!(
             format_status(
                 std::path::Path::new("/home/pi/klipper"),
-                &CheckoutRevision::Known("v0.13.0-756-g2d7717e3".to_owned()),
+                &TargetVersions::klipper(CheckoutRevision::Known(
+                    "v0.13.0-756-g2d7717e3".to_owned()
+                )),
                 &inventory,
                 None,
             ),
@@ -214,7 +219,7 @@ mod tests {
 
         let output = format_status(
             std::path::Path::new("/home/pi/klipper"),
-            &CheckoutRevision::Known("v0.13.0-753-g8c29c0a8e".to_owned()),
+            &TargetVersions::klipper(CheckoutRevision::Known("v0.13.0-753-g8c29c0a8e".to_owned())),
             &inventory,
             None,
         );
@@ -241,7 +246,7 @@ mod tests {
 
         let output = format_status(
             std::path::Path::new("/home/pi/klipper"),
-            &CheckoutRevision::Known("v1".to_owned()),
+            &TargetVersions::klipper(CheckoutRevision::Known("v1".to_owned())),
             &inventory,
             None,
         );
@@ -264,7 +269,7 @@ mod tests {
 
         let output = format_status(
             std::path::Path::new("/home/pi/klipper"),
-            &refreshed.after,
+            &TargetVersions::klipper(refreshed.after.clone()),
             &McuInventory {
                 mcus: Vec::new(),
                 unreported: Vec::new(),
@@ -290,7 +295,7 @@ mod tests {
         let report = status_report(
             "http://127.0.0.1:7125",
             &moonraker,
-            CheckoutRevision::Known("v2".to_owned()),
+            TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
             std::path::Path::new("/klipper"),
         )
         .expect("status report should succeed");
@@ -305,7 +310,7 @@ mod tests {
         let error = status_report(
             "http://127.0.0.1:7125",
             &moonraker,
-            CheckoutRevision::Indeterminate,
+            TargetVersions::indeterminate(),
             std::path::Path::new("/klipper"),
         )
         .expect_err("status report should fail");
