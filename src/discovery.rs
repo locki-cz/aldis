@@ -45,6 +45,23 @@ pub(crate) fn probe_unreported_with(
     }
 }
 
+/// The latest FOCI release when `inventory` has a FOCI MCU to compare with it. A failed lookup
+/// is reported and leaves the FOCI MCUs indeterminate rather than failing the command.
+pub(crate) fn foci_release(
+    inventory: &McuInventory,
+    releases: &impl aldis::foci::ReleasePort,
+) -> Option<aldis::foci::Release> {
+    aldis::foci::release_for(inventory, releases)
+        .inspect_err(|error| {
+            tracing::warn!(
+                "could not look up the latest FOCI release: {}",
+                aldis::error_chain(error)
+            );
+        })
+        .ok()
+        .flatten()
+}
+
 const TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 

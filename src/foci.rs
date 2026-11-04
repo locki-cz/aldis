@@ -306,3 +306,14 @@ pub fn verify_firmware(
     crate::self_update::verify_checksum(asset, firmware, &expected)
         .map_err(|_| ReleaseError::ChecksumMismatch(asset.to_owned()))
 }
+
+/// The latest FOCI release, looked up only when `inventory` has a FOCI MCU to compare with it.
+pub fn release_for(
+    inventory: &crate::moonraker::McuInventory,
+    releases: &impl ReleasePort,
+) -> Result<Option<Release>, ReleaseError> {
+    if !inventory.mcus.iter().any(is_foci) {
+        return Ok(None);
+    }
+    releases.latest_release().map(Some)
+}

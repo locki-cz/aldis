@@ -134,9 +134,11 @@ fn run_update(
             unknown.join(", ")
         );
     }
+    let releases = aldis::foci::GithubReleases::new();
     let versions = TargetVersions::klipper(
         checkout_revision(&source).unwrap_or(CheckoutRevision::Indeterminate),
-    );
+    )
+    .with_foci_release(crate::discovery::foci_release(&inventory, &releases));
     ui.block(&format_status(
         &source,
         &versions,

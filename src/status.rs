@@ -23,6 +23,7 @@ pub(crate) fn status(arguments: ConnectionArgs) -> ExitCode {
     match status_report(
         &arguments.moonraker.moonraker,
         &moonraker,
+        &aldis::foci::GithubReleases::new(),
         versions,
         &source,
     ) {
@@ -37,6 +38,7 @@ pub(crate) fn status(arguments: ConnectionArgs) -> ExitCode {
 fn status_report(
     url: &str,
     moonraker: &(impl MoonrakerPort + aldis::moonraker::HostPort),
+    releases: &impl aldis::foci::ReleasePort,
     versions: TargetVersions,
     source: &std::path::Path,
 ) -> anyhow::Result<String> {
@@ -44,6 +46,7 @@ fn status_report(
     let mut inventory =
         crate::discovery::discover_mcus_with_retry(moonraker).context("failed to discover MCUs")?;
     crate::discovery::probe_unreported(url, moonraker, &mut inventory);
+    let versions = versions.with_foci_release(crate::discovery::foci_release(&inventory, releases));
     Ok(format_status(source, &versions, &inventory, None))
 }
 
@@ -59,6 +62,15 @@ pub(crate) fn format_status(
         source.display(),
         revision,
     );
+    if inventory.mcus.iter().any(aldis::foci::is_foci) {
+        output.push_str(&format!(
+            "FOCI release:      {}\n",
+            versions
+                .foci
+                .as_ref()
+                .map_or("unknown", |release| release.tag.as_str())
+        ));
+    }
     for mcu in &inventory.mcus {
         let status = assess_mcu(mcu, versions);
         output.push_str(&format!("\n{}\n", mcu.name));
@@ -156,6 +168,7 @@ mod tests {
     use super::{format_status, status_report};
     use aldis::checkout::RefreshResult;
     use aldis::eligibility::{CheckoutRevision, TargetVersions};
+    use aldis::foci::{Release, ReleaseError, ReleasePort};
     use aldis::moonraker::{Mcu, McuInventory, McuTransport, MoonrakerError, MoonrakerPort};
 
     #[test]
@@ -300,6 +313,7 @@ mod tests {
         let report = status_report(
             "http://127.0.0.1:7125",
             &moonraker,
+            &NoReleases,
             TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
             std::path::Path::new("/klipper"),
         )
@@ -315,12 +329,101 @@ mod tests {
         let error = status_report(
             "http://127.0.0.1:7125",
             &moonraker,
+            &NoReleases,
             TargetVersions::indeterminate(),
             std::path::Path::new("/klipper"),
         )
         .expect_err("status report should fail");
 
         assert!(format!("{error:#}").contains("no MCU objects were reported"));
+    }
+
+    #[test]
+    fn compares_foci_mcus_with_the_latest_foci_release() {
+        let mut foci = mcu("mcu ouroboros", "v0.4.0-0-g0fb68e1b", None);
+        foci.app = Some("FOCI".to_owned());
+        foci.mcu = "stm32h723xx".to_owned();
+        foci.kconfig = String::new();
+        foci.build_versions = Some("rust=1.98.1 features=none board=0fb68e1b".to_owned());
+        let moonraker = FakeMoonraker(Ok(McuInventory {
+            mcus: vec![mcu("mcu", "v2", None), foci],
+            unreported: Vec::new(),
+        }));
+        let report = |releases: &dyn Fn() -> Result<Release, ReleaseError>| {
+            status_report(
+                "http://127.0.0.1:7125",
+                &moonraker,
+                &FakeReleases(releases),
+                TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
+                std::path::Path::new("/klipper"),
+            )
+            .expect("status report should succeed")
+        };
+
+        let found = report(&|| Ok(Release::from_tag("v0.4.1").unwrap()));
+        assert!(found.contains("FOCI release:      v0.4.1\n"), "{found}");
+        assert!(
+            found.contains(
+                "mcu ouroboros\n  firmware:     FOCI\n  version:      v0.4.0-0-g0fb68e1b\n"
+            ),
+            "{found}"
+        );
+        assert!(
+            found.contains(
+                "  supported:    yes (FOCI ouroboros-fw prod release builds)\n  needs update: yes\n"
+            ),
+            "{found}"
+        );
+
+        let unknown = report(&|| Err(ReleaseError::InvalidTag("nightly".to_owned())));
+        assert!(
+            unknown.contains("FOCI release:      unknown\n"),
+            "{unknown}"
+        );
+        assert!(unknown.contains("  needs update: unknown\n"), "{unknown}");
+    }
+
+    #[test]
+    fn neither_looks_up_nor_shows_a_foci_release_without_a_foci_mcu() {
+        let moonraker = FakeMoonraker(Ok(McuInventory {
+            mcus: vec![mcu("mcu", "v2", None)],
+            unreported: Vec::new(),
+        }));
+        let report = status_report(
+            "http://127.0.0.1:7125",
+            &moonraker,
+            &NoReleases,
+            TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
+            std::path::Path::new("/klipper"),
+        )
+        .expect("status report should succeed");
+
+        assert!(!report.contains("FOCI"), "{report}");
+    }
+
+    /// A release source that must not be asked.
+    struct NoReleases;
+
+    impl ReleasePort for NoReleases {
+        fn latest_release(&self) -> Result<Release, ReleaseError> {
+            panic!("no FOCI MCU, so no release lookup");
+        }
+
+        fn download_firmware(&self, _: &Release, _: &str) -> Result<Vec<u8>, ReleaseError> {
+            panic!("status never downloads firmware");
+        }
+    }
+
+    struct FakeReleases<'a>(&'a dyn Fn() -> Result<Release, ReleaseError>);
+
+    impl ReleasePort for FakeReleases<'_> {
+        fn latest_release(&self) -> Result<Release, ReleaseError> {
+            (self.0)()
+        }
+
+        fn download_firmware(&self, _: &Release, _: &str) -> Result<Vec<u8>, ReleaseError> {
+            panic!("status never downloads firmware");
+        }
     }
 
     struct FakeMoonraker(Result<McuInventory, String>);
