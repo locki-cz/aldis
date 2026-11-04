@@ -95,7 +95,7 @@ first one that applies wins):
 | `current` | Matches the running host | none |
 | `update_available` | Differs from the running host | `update` |
 | `indeterminate` | Revision cannot be compared | none |
-| `externally_managed` | Non-Klipper application (e.g. Beacon) | none |
+| `externally_managed` | Non-Klipper application (e.g. Beacon), or FOCI, which only `aldis update` updates; for a FOCI build no release matches, the message says why | none |
 | `unsupported_legacy` | No embedded kconfig | none |
 | `unsupported_mcu` | The kconfig names an MCU family with no bootloader aldis can drive (e.g. SAMD51); the message names the family | none |
 | `not_identified` | Empty object; fallback not attempted (CAN, host MCU, or port held) | none |

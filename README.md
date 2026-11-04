@@ -109,6 +109,8 @@ These bootloaders are entered and flashed unattended, directly from the running 
 - **PicoBoot** (RP2040/RP2350, `2e8a:0003`/`2e8a:000f`)
 - **SAM-BA** on SAMD21 (the Seeed XIAO SAMD21's UF2 bootloader, `2886:002f`)
 
+FOCI firmware is flashed through Katapult only; see [FOCI](#foci).
+
 Every other bootloader identity is reported as unsupported rather than guessed at. MCUs whose
 firmware configuration names a family none of these bootloaders run on (Katapult builds only for
 STM32, RP2040/RP235x, and LPC176x) are reported as unsupported up front and never offered an
@@ -135,6 +137,18 @@ flashes only after it has. Requirements:
   on the host and not used as a console.
 - `aldis reboot` finds stuck bootloaders by scanning USB, so a Katapult left waiting on a UART is not
   listed. Run `flash` against the MCU again to recover it.
+
+## FOCI
+
+[FOCI](https://github.com/foci-rs/foci) MCUs are not built from the Klipper checkout. `aldis` updates a FOCI release build to the latest FOCI release instead:
+
+- `status` and `update` look up the latest release on GitHub when Moonraker reports an MCU whose firmware names itself `FOCI`, and show it as `FOCI release`. A failed lookup is reported, and the FOCI MCUs' update state stays unknown. Nothing is looked up without a FOCI MCU.
+- The board comes from the firmware's `MCU` (`stm32h723xx` is Ouroboros, `stm32f407xx` is OpenFFBoard) and the flavor from its build features (`prod`, or `trace`). The update downloads that board's and flavor's `.bin` from the release, checks it against the `.sha256` published beside it, and keeps a copy in the run workspace.
+- Only release builds are compared with the release: a development or dirty build, or one newer than the release, shows as unknown and is updated only with `--all` or `--force`. A build with other features (for example `dev`) has no release to update to and is reported as unsupported.
+- The image is sent only to Katapult, over the board's USB serial device, and only when Katapult starts applications where the image is linked to run (`0x08020000` on Ouroboros, `0x08008000` on OpenFFBoard). Otherwise nothing is written and Katapult is asked to start the existing application.
+- Keep the `klipper-foci` host module in step with the firmware: update it (for example through Moonraker's update manager) before updating the firmware, including before `update --auto`.
+
+`flash` sends a firmware file for a FOCI MCU through the same Katapult-only path. The agent shows FOCI MCUs without an update action; update them with `update`.
 
 ## License
 
