@@ -163,3 +163,31 @@ fn compares_only_release_builds_against_a_release() {
         RevisionStatus::Indeterminate
     );
 }
+
+#[test]
+fn verifies_firmware_against_its_published_sha256_file() {
+    use aldis::foci::{ReleaseError, verify_firmware};
+    use sha2::{Digest, Sha256};
+
+    let asset = "ouroboros-fw-v0.4.1-prod.bin";
+    let firmware = b"firmware image".as_slice();
+    let digest: String = Sha256::digest(firmware)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let checksum_file = format!("{digest}  {asset}\n");
+
+    assert!(verify_firmware(asset, &checksum_file, firmware).is_ok());
+    assert!(matches!(
+        verify_firmware(asset, &checksum_file, b"tampered"),
+        Err(ReleaseError::ChecksumMismatch(file)) if file == asset
+    ));
+    assert!(matches!(
+        verify_firmware(asset, &format!("{digest}  openffboard-fw-v0.4.1-prod.bin\n"), firmware),
+        Err(ReleaseError::ChecksumInvalid(file)) if file == asset
+    ));
+    assert!(matches!(
+        verify_firmware(asset, "", firmware),
+        Err(ReleaseError::ChecksumInvalid(_))
+    ));
+}
