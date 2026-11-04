@@ -377,3 +377,37 @@ fn names_a_beacon_even_when_its_version_cannot_be_compared() {
         "Cartographer 2.1.0"
     )));
 }
+
+#[test]
+fn picks_the_recovery_image_for_a_stuck_bootloader_by_its_revision() {
+    use aldis::beacon::recovery_image;
+
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = checkout_with(dir.path(), "h", &dfu_file(&[7; 64], 0x04d8, 0xbea1, 0x2010));
+
+    let (path, image) =
+        recovery_image(Some(&checkout), "Beacon RevH Bootloader", "04d8:bea1").unwrap();
+    assert_eq!(path, image_path(&checkout, "h"));
+    assert_eq!(image.version.to_string(), "2.1.0");
+
+    assert_eq!(
+        recovery_image(Some(&checkout), "Beacon RevH Bootloader", "04d8:beac").unwrap_err(),
+        Unavailable::WrongBootloader {
+            path: image_path(&checkout, "h"),
+            image: "04d8:bea1".to_owned(),
+            bootloader: "04d8:beac".to_owned(),
+        }
+    );
+    assert!(matches!(
+        recovery_image(Some(&checkout), "Beacon RevD Bootloader", "04d8:beac"),
+        Err(Unavailable::Unreadable { .. })
+    ));
+    assert_eq!(
+        recovery_image(Some(&checkout), "Bootloader", "04d8:bea1").unwrap_err(),
+        Unavailable::UnknownRevision("Bootloader".to_owned())
+    );
+    assert_eq!(
+        recovery_image(None, "Beacon RevH Bootloader", "04d8:bea1").unwrap_err(),
+        Unavailable::NoCheckout
+    );
+}

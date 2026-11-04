@@ -829,6 +829,16 @@ pub fn flash_beacon_with_progress(
     )
     .map_err(SystemFlashError::BeaconDfu)?;
     progress(SystemFlashProgress::BootloaderReady);
+    flash_beacon_bootloader(&bootloader, image, progress)
+}
+
+/// Flashes a Beacon firmware image to a Beacon already in its bootloader, refusing a bootloader
+/// the image's DFU suffix does not name.
+pub fn flash_beacon_bootloader(
+    bootloader: &beacon_dfu::ObservedBootloader,
+    image: &FirmwareImage,
+    mut progress: impl FnMut(SystemFlashProgress),
+) -> Result<FlashResult, SystemFlashError> {
     if bootloader.usb_id() != image.usb_id() {
         return Err(SystemFlashError::BeaconImageMismatch {
             bootloader: bootloader.usb_id(),
@@ -837,7 +847,7 @@ pub fn flash_beacon_with_progress(
     }
     wait_for_usb_device_access(&bootloader.sysfs_path)?;
     progress(SystemFlashProgress::Flashing);
-    beacon_dfu::flash(&bootloader, &image.payload).map_err(SystemFlashError::BeaconDfu)
+    beacon_dfu::flash(bootloader, &image.payload).map_err(SystemFlashError::BeaconDfu)
 }
 
 /// The offset the device currently runs its application from, as far as the probe can tell.

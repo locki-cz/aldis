@@ -242,3 +242,27 @@ fn explains_a_bootloader_the_beacon_image_is_not_for() {
         "the Beacon is left in its bootloader"
     );
 }
+
+#[test]
+fn refuses_a_beacon_bootloader_the_image_is_not_for_before_opening_it() {
+    let bootloader = aldis::flash::beacon_dfu::ObservedBootloader {
+        sysfs_path: PathBuf::from("/nonexistent/1-1"),
+        vendor_id: 0x04d8,
+        product_id: 0xbeac,
+        product: "Beacon RevD Bootloader".to_owned(),
+    };
+    let mut stages = Vec::new();
+
+    let error =
+        aldis::flash::system::flash_beacon_bootloader(&bootloader, &beacon_image(), |stage| {
+            stages.push(stage)
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, SystemFlashError::BeaconImageMismatch { bootloader, image }
+            if bootloader == "04d8:beac" && image == "04d8:bea1"),
+        "{error:?}"
+    );
+    assert!(stages.is_empty());
+}

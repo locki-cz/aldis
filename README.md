@@ -163,7 +163,9 @@ flashes only after it has. Requirements:
 - The images are Beacon's and not freely redistributable, so `aldis` only ever reads them from your own checkout. It never downloads or copies them anywhere else.
 - `aldis setup` grants access to the Beacon bootloader; rerun it after upgrading `aldis`.
 
-`flash` accepts only a Beacon `.dfu` image for a Beacon, and sends it through the same route. The agent compares Beacons with their images and offers to update outdated ones.
+`flash` accepts only a Beacon `.dfu` image for a Beacon, including one whose version `aldis` cannot compare (such as a beta), and sends it through the same route. The agent compares Beacons with their images and offers to update outdated ones.
+
+A Beacon left in its bootloader (for example by an interrupted flash) can only leave it by being flashed. `aldis reboot` finds it on USB and, after asking, flashes the image for the revision its bootloader names, from the same checkout (`--beacon-source` names another). It flashes nothing when the checkout's image is not for that bootloader. Restart Klipper afterwards (`FIRMWARE_RESTART`) so it reconnects the Beacon.
 
 ## License
 

@@ -285,6 +285,12 @@ pub enum Unavailable {
     Unreadable { path: PathBuf, reason: String },
     #[error("{path} is not a Beacon firmware image: {reason}")]
     InvalidImage { path: PathBuf, reason: ImageError },
+    #[error("{path} is for bootloader {image}, not {bootloader}")]
+    WrongBootloader {
+        path: PathBuf,
+        image: String,
+        bootloader: String,
+    },
 }
 
 /// What each Beacon in an inventory is updated to.
@@ -366,6 +372,36 @@ fn resolve_target(
     })
 }
 
+/// The image that brings a Beacon out of its bootloader `usb_id`, whose USB product string is
+/// `product` (`Beacon RevH Bootloader`): the one in `checkout` for the revision it names, which
+/// must be for this bootloader.
+pub fn recovery_image(
+    checkout: Option<&Path>,
+    product: &str,
+    usb_id: &str,
+) -> Result<(PathBuf, FirmwareImage), Unavailable> {
+    let checkout = checkout.ok_or(Unavailable::NoCheckout)?;
+    let revision =
+        revision_from_product(product).ok_or(Unavailable::UnknownRevision(product.to_owned()))?;
+    let path = image_path(checkout, &revision);
+    let image = read_image(&path)?;
+    if image.usb_id() != usb_id {
+        return Err(Unavailable::WrongBootloader {
+            path,
+            image: image.usb_id(),
+            bootloader: usb_id.to_owned(),
+        });
+    }
+    Ok((path, image))
+}
+
+/// The checkout [`locate_checkout`] finds from the environment: `configured`, the one
+/// `klipper_source` links `beacon.py` from, or `~/beacon_klipper`.
+pub fn find_checkout(configured: Option<&Path>, klipper_source: Option<&Path>) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    locate_checkout(configured, klipper_source, home.as_deref())
+}
+
 /// The USB product string of the device behind the serial port `device`.
 pub fn usb_product(device: &Path) -> Option<String> {
     let usb = crate::flash::katapult::serial::usb_device_path(device)?;
@@ -383,8 +419,7 @@ pub fn targets_for(
     if !inventory.mcus.iter().any(is_beacon) {
         return Targets::default();
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let checkout = locate_checkout(configured, klipper_source, home.as_deref());
+    let checkout = find_checkout(configured, klipper_source);
     tracing::debug!(?checkout, "beacon_klipper checkout located");
     resolve_targets(inventory, checkout.as_deref(), usb_product)
 }

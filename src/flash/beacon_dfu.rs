@@ -21,6 +21,8 @@ pub struct ObservedBootloader {
     pub sysfs_path: PathBuf,
     pub vendor_id: u16,
     pub product_id: u16,
+    /// The bootloader's USB product string, which names the Beacon's revision.
+    pub product: String,
 }
 
 impl ObservedBootloader {
@@ -75,11 +77,31 @@ pub fn bootloader_at(usb_path: &Path) -> Option<ObservedBootloader> {
     let vendor_id = read_hex_id(&usb_path.join("idVendor"))?;
     let product_id = read_hex_id(&usb_path.join("idProduct"))?;
     let product = std::fs::read_to_string(usb_path.join("product")).ok()?;
-    is_bootloader(vendor_id, product_id, product.trim()).then(|| ObservedBootloader {
+    let product = product.trim();
+    is_bootloader(vendor_id, product_id, product).then(|| ObservedBootloader {
         sysfs_path: usb_path.to_owned(),
         vendor_id,
         product_id,
+        product: product.to_owned(),
     })
+}
+
+/// Every Beacon bootloader among the USB devices directly under `root` (normally
+/// `/sys/bus/usb/devices`), such as one an interrupted flash left behind.
+pub fn scan_bootloaders(root: &Path) -> Vec<ObservedBootloader> {
+    crate::flash::usb_sysfs::usb_device_dirs(root)
+        .iter()
+        .filter_map(|path| bootloader_at(path))
+        .collect()
+}
+
+/// Waits until the device at `usb_path` is no longer a Beacon bootloader: it reset into its
+/// application, or left the bus. Returns whether it did before `timeout`.
+pub fn wait_until_left(usb_path: &Path, timeout: Duration, poll_interval: Duration) -> bool {
+    retry_until_available(timeout, poll_interval, || {
+        bootloader_at(usb_path).map_or(Ok(()), |_| Err(()))
+    })
+    .is_ok()
 }
 
 /// Asks the Beacon on serial port `device` to enter its bootloader with a 1200-baud touch and
@@ -186,5 +208,41 @@ mod tests {
         let observed = bootloader_at(usb).unwrap();
         assert_eq!(observed.usb_id(), "04d8:bea1");
         assert_eq!(observed.sysfs_path, usb);
+        assert_eq!(observed.product, "Beacon RevH Bootloader");
+    }
+
+    #[test]
+    fn finds_beacon_bootloaders_on_the_bus_and_sees_them_leave() {
+        use std::time::Duration;
+
+        let root = tempfile::tempdir().unwrap();
+        let device = |name: &str, id: &str, product: &str| {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("idVendor"), "04d8\n").unwrap();
+            std::fs::write(path.join("idProduct"), format!("{id}\n")).unwrap();
+            std::fs::write(path.join("product"), format!("{product}\n")).unwrap();
+            path
+        };
+        let stuck = device("1-1", "beac", "Beacon RevD Bootloader");
+        device("1-2", "bea1", "Beacon RevH");
+
+        let found = super::scan_bootloaders(root.path());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].usb_id(), "04d8:beac");
+        assert_eq!(found[0].sysfs_path, std::fs::canonicalize(&stuck).unwrap());
+
+        let short = Duration::from_millis(20);
+        assert!(!super::wait_until_left(
+            &stuck,
+            short,
+            Duration::from_millis(5)
+        ));
+        std::fs::write(stuck.join("product"), "Beacon RevD\n").unwrap();
+        assert!(super::wait_until_left(
+            &stuck,
+            short,
+            Duration::from_millis(5)
+        ));
     }
 }
