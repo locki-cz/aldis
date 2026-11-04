@@ -92,13 +92,28 @@ fn run_flash(mut arguments: FlashArgs, ui: &mut UpdateUi) -> anyhow::Result<()> 
         ui.action(&format!("error: {message}"));
         anyhow::anyhow!(message)
     })?;
-    match coordinator.flash_firmware_system_with_progress(
-        pending.approve(),
-        &firmware,
-        options,
-        arguments.force,
-        |progress| ui.progress_without_build(progress),
-    ) {
+    // FOCI images carry no Kconfig and are linked for their board's Katapult, so they go to
+    // Katapult only, and only one that starts applications where the board's builds are linked.
+    let foci_board = aldis::foci::is_foci(mcu)
+        .then(|| aldis::foci::Board::from_mcu(&mcu.mcu))
+        .flatten();
+    let flashed = match foci_board {
+        Some(board) => coordinator.flash_prebuilt_with_progress(
+            pending.approve(),
+            &firmware,
+            board.application_start(),
+            options,
+            |progress| ui.progress_without_build(progress),
+        ),
+        None => coordinator.flash_firmware_system_with_progress(
+            pending.approve(),
+            &firmware,
+            options,
+            arguments.force,
+            |progress| ui.progress_without_build(progress),
+        ),
+    };
+    match flashed {
         Ok(result) => {
             ui.finish_success(crate::ui::transfer_summary(
                 &target_kconfig,
@@ -176,6 +191,13 @@ fn confirmation_prompt(target: &str, firmware: &Path, byte_count: usize) -> Stri
 
 fn flash_refusal(inventory: &McuInventory, target: &str) -> Option<String> {
     let mcu = inventory.mcus.iter().find(|mcu| mcu.name == target)?;
+    if aldis::foci::is_foci(mcu) && aldis::foci::Board::from_mcu(&mcu.mcu).is_none() {
+        return Some(format!(
+            "refusing to flash {target}: FOCI publishes no builds for {} boards, so aldis cannot \
+             tell where its firmware must start",
+            mcu.mcu
+        ));
+    }
     match classify_mcu(mcu) {
         Eligibility::UnsupportedMcu(family) => Some(format!(
             "refusing to flash {target}: {family} boards have no bootloader aldis can flash"
@@ -223,6 +245,20 @@ mod tests {
             flash_refusal(&inventory_with("CONFIG_MACH_ATSAMD=y\n"), "mcu other"),
             None
         );
+    }
+
+    #[test]
+    fn refuses_to_flash_foci_on_a_board_without_a_known_application_start() {
+        let mut inventory = inventory_with("");
+        let foci = &mut inventory.mcus[0];
+        foci.app = Some("FOCI".to_owned());
+        foci.mcu = "stm32g474xx".to_owned();
+
+        let reason = flash_refusal(&inventory, "mcu xiao").expect("an unknown FOCI board");
+        assert!(reason.contains("stm32g474xx"), "{reason}");
+
+        inventory.mcus[0].mcu = "stm32h723xx".to_owned();
+        assert_eq!(flash_refusal(&inventory, "mcu xiao"), None);
     }
 
     #[test]
