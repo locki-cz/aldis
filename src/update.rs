@@ -185,6 +185,7 @@ fn run_update(
         RunRequest {
             targets: &offered,
             target_versions: &versions,
+            foci_releases: &releases,
             clean: arguments.clean,
         },
         &mut hooks,

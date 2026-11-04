@@ -242,6 +242,9 @@ impl SystemBackend {
             RunRequest {
                 targets,
                 target_versions: &TargetVersions::klipper(CheckoutRevision::Known(version.clone())),
+                // The agent offers no FOCI updates (no FOCI release is targeted), so this is
+                // never asked for firmware.
+                foci_releases: &crate::foci::GithubReleases::new(),
                 clean: false,
             },
             hooks,

@@ -387,6 +387,33 @@ fn reports_a_foci_build_no_release_matches_as_unsupported() {
 }
 
 #[test]
+fn selects_foci_mcus_like_klipper_ones() {
+    let outdated = foci("v0.4.0-0-g0fb68e1b", FOCI_PROD);
+    let current = foci("v0.4.1-0-ga82de21d", FOCI_PROD);
+    let versions = foci_release("v0.4.1");
+
+    assert!(is_selected(
+        &outdated,
+        &versions,
+        &UpdateSelection::Required
+    ));
+    assert!(!is_selected(
+        &current,
+        &versions,
+        &UpdateSelection::Required
+    ));
+    assert!(is_selected(&current, &versions, &UpdateSelection::All));
+    assert!(
+        !is_selected(
+            &current,
+            &TargetVersions::indeterminate(),
+            &UpdateSelection::All
+        ),
+        "a FOCI MCU needs a known release to be updated to"
+    );
+}
+
+#[test]
 fn targets_and_confirms_foci_mcus_by_the_foci_release() {
     let versions = foci_release("v0.4.1");
     let klipper = mcu(

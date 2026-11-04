@@ -138,6 +138,10 @@ pub struct CompletedUpdate {
 pub enum UpdateProgress {
     /// Klipper is stopping before the first build in the batch.
     StoppingKlipper,
+    /// A prebuilt firmware image is being downloaded.
+    DownloadingFirmware,
+    /// The prebuilt firmware image was downloaded and verified.
+    FirmwareDownloaded,
     /// Klipper is expanding the selected MCU configuration.
     ConfiguringFirmware,
     /// Klipper is compiling the selected firmware artifact.

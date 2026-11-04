@@ -172,7 +172,13 @@ pub enum UpdateSelection {
 /// Returns whether one MCU is eligible for the requested update selection.
 pub fn is_selected(mcu: &Mcu, versions: &TargetVersions, selection: &UpdateSelection) -> bool {
     let status = assess_mcu(mcu, versions);
-    if status.eligibility != Eligibility::Eligible {
+    let updatable = match status.eligibility {
+        Eligibility::Eligible => true,
+        // A FOCI MCU is updated to the FOCI release, so even `All` needs one to be known.
+        Eligibility::Foci(_) => versions.foci.is_some(),
+        _ => false,
+    };
+    if !updatable {
         return false;
     }
     match selection {

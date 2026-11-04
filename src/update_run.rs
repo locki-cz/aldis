@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use crate::build::CommandPort;
 use crate::coordinator::{BuildCoordinator, FlashCoordinatorError, UpdateProgress};
-use crate::eligibility::TargetVersions;
+use crate::eligibility::{Eligibility, TargetVersions, classify_mcu};
 use crate::flash::linux_host::HOST_MCU_UNIT_FILE;
 use crate::flash::system::{SystemFlashOptions, SystemKatapultOptions};
+use crate::foci::ReleasePort;
 use crate::moonraker::{HostPort, McuInventory, McuTransport, MoonrakerPort, PrinterStatePort};
 use crate::retry::retry_until_available;
 use crate::workspace::RunWorkspace;
@@ -266,6 +267,8 @@ pub trait RunHooks {
 pub struct RunRequest<'a> {
     pub targets: &'a [String],
     pub target_versions: &'a TargetVersions,
+    /// Where FOCI MCUs' firmware is downloaded from.
+    pub foci_releases: &'a dyn ReleasePort,
     pub clean: bool,
 }
 
@@ -342,8 +345,44 @@ fn post_flash_failure(
     )
 }
 
-/// Builds and flashes each approved target in order, then starts Klipper and waits for every
-/// updated MCU to reconnect at its target version. The first failure ends the run.
+/// Downloads the FOCI release image that replaces `firmware` and keeps a copy beside the run's
+/// other artifacts. Returns the failure's description when there is no image to flash.
+fn download_foci_firmware(
+    firmware: &crate::foci::Firmware,
+    pending: &crate::coordinator::PendingBuild,
+    request: &RunRequest<'_>,
+    hooks: &mut dyn RunHooks,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    let release = request
+        .target_versions
+        .foci
+        .as_ref()
+        .ok_or_else(|| format!("no FOCI release is known to update {name} to"))?;
+    let asset = release.asset_name(firmware.board, firmware.flavor);
+    hooks.progress(name, UpdateProgress::DownloadingFirmware);
+    let image = request
+        .foci_releases
+        .download_firmware(release, &asset)
+        .map_err(|error| {
+            tracing::debug!(?error, "FOCI firmware download failed");
+            format!(
+                "could not download {asset} from FOCI {}: {}",
+                release.tag,
+                crate::error_chain(&error)
+            )
+        })?;
+    hooks.progress(name, UpdateProgress::FirmwareDownloaded);
+    let copy = pending.artifact_path().with_file_name(&asset);
+    if let Err(error) = std::fs::write(&copy, &image) {
+        tracing::debug!(?error, path = %copy.display(), "could not keep a copy of the firmware");
+    }
+    Ok(image)
+}
+
+/// Builds (or, for FOCI, downloads) and flashes each approved target in order, then starts
+/// Klipper and waits for every updated MCU to reconnect at its target version. The first failure
+/// ends the run.
 pub fn run_updates<B: CommandPort, S: CommandPort>(
     coordinator: &BuildCoordinator<B, S>,
     moonraker: &(impl MoonrakerPort + PrinterStatePort + HostPort),
@@ -384,13 +423,42 @@ pub fn run_updates<B: CommandPort, S: CommandPort>(
             }
             printer_checked = true;
         }
-        match coordinator.execute_and_flash_system_with_progress(
-            pending.approve(),
-            standard_flash_options(),
-            |progress| hooks.progress(name, progress),
-        ) {
-            Ok(completed) => {
-                hooks.flashed(name, &mcu.kconfig, completed.flash.padded_bytes);
+        let flashed = match classify_mcu(mcu) {
+            Eligibility::Foci(firmware) => {
+                let image = match download_foci_firmware(&firmware, &pending, &request, hooks, name)
+                {
+                    Ok(image) => image,
+                    Err(detail) => {
+                        // Nothing was written to this MCU; Klipper goes back to how it was found.
+                        let restore = coordinator.restore_after_failure();
+                        return Err(fail_with_detail(
+                            hooks,
+                            detail.clone(),
+                            failure_message(Operation::Update, detail, Some(restore)),
+                            Some(name),
+                            &updated,
+                        ));
+                    }
+                };
+                coordinator.flash_prebuilt_with_progress(
+                    pending.approve(),
+                    &image,
+                    firmware.board.application_start(),
+                    standard_flash_options(),
+                    |progress| hooks.progress(name, progress),
+                )
+            }
+            _ => coordinator
+                .execute_and_flash_system_with_progress(
+                    pending.approve(),
+                    standard_flash_options(),
+                    |progress| hooks.progress(name, progress),
+                )
+                .map(|completed| completed.flash),
+        };
+        match flashed {
+            Ok(flash) => {
+                hooks.flashed(name, &mcu.kconfig, flash.padded_bytes);
                 hooks.step_started(RunStep::WaitForApplication);
                 if let Err(message) = wait_for_application(mcu) {
                     tracing::debug!(error = %message, "waiting for MCU restart failed");
@@ -958,6 +1026,245 @@ mod tests {
         }
     }
 
+    /// A FOCI release source that must not be asked.
+    struct NoReleases;
+
+    impl ReleasePort for NoReleases {
+        fn latest_release(&self) -> Result<crate::foci::Release, crate::foci::ReleaseError> {
+            panic!("runs never look up a release");
+        }
+
+        fn download_firmware(
+            &self,
+            _: &crate::foci::Release,
+            _: &str,
+        ) -> Result<Vec<u8>, crate::foci::ReleaseError> {
+            panic!("no FOCI MCU is updated");
+        }
+    }
+
+    /// Serves one FOCI firmware download and records the asset asked for.
+    struct OneDownload {
+        result: fn() -> Result<Vec<u8>, crate::foci::ReleaseError>,
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl ReleasePort for OneDownload {
+        fn latest_release(&self) -> Result<crate::foci::Release, crate::foci::ReleaseError> {
+            panic!("runs never look up a release");
+        }
+
+        fn download_firmware(
+            &self,
+            release: &crate::foci::Release,
+            asset: &str,
+        ) -> Result<Vec<u8>, crate::foci::ReleaseError> {
+            self.asked
+                .borrow_mut()
+                .push(format!("{}/{asset}", release.tag));
+            (self.result)()
+        }
+    }
+
+    /// Answers every `systemctl is-active` with `inactive`, so nothing needs stopping.
+    #[derive(Clone, Default)]
+    struct InactiveKlipper(Arc<Mutex<Vec<BuildCommand>>>);
+
+    impl CommandPort for InactiveKlipper {
+        fn run(&self, command: &BuildCommand) -> Result<CommandOutput, CommandError> {
+            self.0.lock().unwrap().push(command.clone());
+            Ok(CommandOutput {
+                success: false,
+                stdout: b"inactive\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn foci_mcu(transport: McuTransport) -> Mcu {
+        Mcu {
+            name: "mcu ouroboros".to_owned(),
+            app: Some("FOCI".to_owned()),
+            version: Some("v0.4.0-0-g0fb68e1b".to_owned()),
+            mcu: "stm32h723xx".to_owned(),
+            canbus_frequency_hz: None,
+            build_versions: Some("rust=1.98.1 features=none board=0fb68e1b".to_owned()),
+            transport: Some(transport),
+            kconfig: String::new(),
+        }
+    }
+
+    fn foci_target() -> TargetVersions {
+        TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned()))
+            .with_foci_release(crate::foci::Release::from_tag("v0.4.1"))
+    }
+
+    fn approving() -> Recorder {
+        Recorder {
+            approve: true,
+            ..Recorder::default()
+        }
+    }
+
+    #[test]
+    fn downloads_the_foci_release_image_and_sends_it_to_katapult_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = RunWorkspace::create(dir.path().join("run")).unwrap();
+        let inventory = McuInventory {
+            mcus: vec![foci_mcu(McuTransport::Can {
+                interface: "can0".to_owned(),
+                uuid: 0xe781_9ed8_e7d3,
+            })],
+            unreported: Vec::new(),
+        };
+        let runner = InactiveKlipper::default();
+        let coordinator = BuildCoordinator::new("/nonexistent", runner.clone(), runner.clone());
+        let releases = OneDownload {
+            result: || Ok(vec![0xab; 16]),
+            asked: RefCell::new(Vec::new()),
+        };
+        let mut hooks = approving();
+
+        let failure = run_updates(
+            &coordinator,
+            &Printer(PrintState::Standby),
+            &inventory,
+            &workspace,
+            RunRequest {
+                targets: &["mcu ouroboros".to_owned()],
+                target_versions: &foci_target(),
+                foci_releases: &releases,
+                clean: false,
+            },
+            &mut hooks,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            *releases.asked.borrow(),
+            vec!["v0.4.1/ouroboros-fw-v0.4.1-prod.bin".to_owned()]
+        );
+        let paths = workspace.build_paths("mcu ouroboros").unwrap();
+        assert_eq!(
+            std::fs::read(
+                paths
+                    .artifact_path
+                    .with_file_name("ouroboros-fw-v0.4.1-prod.bin")
+            )
+            .unwrap(),
+            vec![0xab; 16],
+            "the run keeps the image it flashed"
+        );
+        assert!(
+            failure
+                .detail
+                .contains("only through Katapult on a USB serial device"),
+            "{}",
+            failure.detail
+        );
+        assert!(
+            failure
+                .message
+                .ends_with("Klipper has been left in its state from before this update"),
+            "{}",
+            failure.message
+        );
+        assert!(
+            runner
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|command| !format!("{command:?}").contains("make")),
+            "a FOCI update never builds"
+        );
+    }
+
+    #[test]
+    fn a_failed_foci_download_flashes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = RunWorkspace::create(dir.path().join("run")).unwrap();
+        let inventory = McuInventory {
+            mcus: vec![foci_mcu(McuTransport::Serial {
+                device: "/dev/serial/by-id/usb-foci_FOCI_Ouroboros-if00".to_owned(),
+            })],
+            unreported: Vec::new(),
+        };
+        let runner = RecordingRunner::default();
+        let coordinator = BuildCoordinator::new("/nonexistent", runner.clone(), runner.clone());
+        let releases = OneDownload {
+            result: || {
+                Err(crate::foci::ReleaseError::ChecksumMismatch(
+                    "ouroboros-fw-v0.4.1-prod.bin".to_owned(),
+                ))
+            },
+            asked: RefCell::new(Vec::new()),
+        };
+        let mut hooks = approving();
+
+        let failure = run_updates(
+            &coordinator,
+            &Printer(PrintState::Standby),
+            &inventory,
+            &workspace,
+            RunRequest {
+                targets: &["mcu ouroboros".to_owned()],
+                target_versions: &foci_target(),
+                foci_releases: &releases,
+                clean: false,
+            },
+            &mut hooks,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            failure.detail,
+            "could not download ouroboros-fw-v0.4.1-prod.bin from FOCI v0.4.1: downloaded \
+             ouroboros-fw-v0.4.1-prod.bin does not match its published SHA-256 digest"
+        );
+        assert_eq!(failure.mcu.as_deref(), Some("mcu ouroboros"));
+        assert!(
+            runner.0.lock().unwrap().is_empty(),
+            "Klipper is neither stopped nor restarted"
+        );
+    }
+
+    #[test]
+    fn refuses_a_foci_update_without_a_known_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = RunWorkspace::create(dir.path().join("run")).unwrap();
+        let inventory = McuInventory {
+            mcus: vec![foci_mcu(McuTransport::Serial {
+                device: "/dev/serial/by-id/usb-foci_FOCI_Ouroboros-if00".to_owned(),
+            })],
+            unreported: Vec::new(),
+        };
+        let runner = RecordingRunner::default();
+        let coordinator = BuildCoordinator::new("/nonexistent", runner.clone(), runner.clone());
+        let mut hooks = approving();
+
+        let failure = run_updates(
+            &coordinator,
+            &Printer(PrintState::Standby),
+            &inventory,
+            &workspace,
+            RunRequest {
+                targets: &["mcu ouroboros".to_owned()],
+                target_versions: &TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
+                foci_releases: &NoReleases,
+                clean: false,
+            },
+            &mut hooks,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            failure.detail,
+            "no FOCI release is known to update mcu ouroboros to"
+        );
+        assert!(runner.0.lock().unwrap().is_empty());
+    }
+
     fn fixture() -> (
         tempfile::TempDir,
         RunWorkspace,
@@ -1012,6 +1319,7 @@ mod tests {
             RunRequest {
                 targets: &["mcu".to_owned()],
                 target_versions: &TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
+                foci_releases: &NoReleases,
                 clean: false,
             },
             &mut hooks,
@@ -1038,6 +1346,7 @@ mod tests {
             RunRequest {
                 targets: &["mcu".to_owned()],
                 target_versions: &TargetVersions::klipper(CheckoutRevision::Known("v2".to_owned())),
+                foci_releases: &NoReleases,
                 clean: false,
             },
             &mut hooks,
