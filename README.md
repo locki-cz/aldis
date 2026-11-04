@@ -192,6 +192,8 @@ A Beacon left in its bootloader (for example by an interrupted flash) can only l
 
 `flash` accepts for a Cartographer only an image whose identify dictionary names its own `MCU`, link and CAN bitrate and that starts at `0x08002000`; a file for the other build (full or lite) is allowed. The agent reports Cartographers as current or behind their image but offers no update action; update them with `aldis update` and their name.
 
+FOCI, Beacon and Cartographer support has not yet been run against real hardware; [docs/hardware-testing.md](docs/hardware-testing.md) lists what to try on each and what to report.
+
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).
