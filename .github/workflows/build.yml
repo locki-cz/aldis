@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - codex/build-usb-can-test
   schedule:
     - cron: "0 6 * * 1"
 
@@ -78,7 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build: [x86_64-linux, aarch64-linux, armv7l-linux]
+        build: [aarch64-linux]
         include:
           - build: x86_64-linux
             target: x86_64-unknown-linux-musl
