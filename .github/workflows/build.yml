@@ -75,7 +75,7 @@ jobs:
   dist:
     name: Dist (${{ matrix.build }})
     if: ${{ github.event_name == 'push' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     strategy:
       fail-fast: false
       matrix:
@@ -91,15 +91,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install cross-compilation tool
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-      - name: Install ARM binary tools
-        if: matrix.build != 'x86_64-linux'
-        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
+      - name: Install MUSL tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools binutils
       - name: Build binary
-        run: cross build --target ${{ matrix.target }} --release --locked
+        run: cargo build --target ${{ matrix.target }} --release --locked
       - name: Verify static binary
         run: |
           BINARY="target/${{ matrix.target }}/release/aldis"
@@ -108,13 +103,7 @@ jobs:
             exit 1
           fi
       - name: Strip binary
-        run: |
-          case "${{ matrix.build }}" in
-            aarch64-linux) STRIP_CMD="aarch64-linux-gnu-strip" ;;
-            armv7l-linux) STRIP_CMD="arm-linux-gnueabihf-strip" ;;
-            *) STRIP_CMD="strip" ;;
-          esac
-          "$STRIP_CMD" --strip-unneeded "target/${{ matrix.target }}/release/aldis"
+        run: strip --strip-unneeded "target/${{ matrix.target }}/release/aldis"
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
